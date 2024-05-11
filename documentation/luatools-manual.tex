@@ -1,0 +1,130 @@
+\doifnot{\contextmark}{LMTX}{
+    \errhelp{LMTX/MkXL is required to compile this file.}
+    \errmessage{Fatal error, exiting.}
+}
+
+\environment lwc-manual
+
+\setuplayout[width=43em]
+
+\begingroup
+    \tt
+    \ctxlua{tt_font = font.current()}
+\endgroup
+
+\definecolor[transparent][t=0.0, a=1]
+\definecolor[code][x=e6ebe6]
+
+\definetextbackground[code][
+    location=always,
+    background=color,
+    backgroundcolor=code,
+    backgroundoffset=1ex,
+    frame=on,
+    framecolor=transparent,
+    rulethickness=1pt,
+    corner=round,
+    radius=4ex,
+]
+
+\def\startcode[#1]{%
+    \def\codelanguage{#1}%
+    \blank[halfline]%
+    \starttextbackground[code]%
+    \grabbufferdata[code][startcode][stopcode]%
+}
+
+\startluacode
+    local highlight <const> = require("syntax")
+
+    interfaces.implement {
+        name = "lua",
+        public = true,
+        arguments = { "string" },
+        actions = function(code)
+            highlight("lua", code, tt_font)
+        end
+    }
+
+    interfaces.implement {
+        name = "stopcode",
+        public = true,
+        actions = function()
+            local language = tokens.getters.macro("codelanguage")
+            local code = buffers.raw("code")
+            highlight(language, code, tt_font)
+            context.stoptextbackground()
+            context.blank { "halfline" }
+        end
+    }
+
+    local function is_comment(line)
+        line = line or ""
+        return line:match("^%-%-%- (.*) %-%-%-$") or
+               line:match("^%-%-%- (.*)$") or
+              (line:match("^%-+$") and "")
+    end
+
+    local function is_blank(line)
+        return (line or ""):match("^%s*$")
+    end
+
+    interfaces.implement {
+        name = "processfile",
+        public = true,
+        arguments = { "string" },
+        actions = function(filename)
+            local lines <const> = io.loaddata(filename):splitlines()
+
+            context.stepwise(function()
+                local text
+                for index, line in ipairs(lines) do
+                    local prev_comment = is_comment(lines[index - 1])
+                    local this_comment = is_comment(line)
+                    local next_comment = is_comment(lines[index + 1])
+
+                    local prev_blank = is_blank(lines[index - 1])
+                    local this_blank = is_blank(line)
+                    local next_blank = is_blank(lines[index + 1])
+
+                    if this_comment then
+                        text = (text or [[\noindent ]]) .. this_comment .. "\n"
+                    elseif text then
+                        buffers.assign("content", text)
+                        context.getbuffer { "content" }
+                        context.blank { "quarterline" }
+                        context.step()
+                        text = nil
+                    end
+
+                    if not this_comment then
+                        if not this_blank or
+                           (this_blank and not (prev_blank or next_blank or prev_comment))
+                        then
+                            context.par()
+                            context.step()
+                            highlight("lua", line, tt_font)
+                        end
+                    end
+                end
+            end)
+        end
+    }
+\stopluacode
+
+\setuphead[subsection][
+    alternative=normal,
+    style=\ssbfa,
+    after={\blank[disable, penalty:10000]},
+    page=yes,
+    continue=yes,
+]
+
+\startdocument[
+    title=luatools,
+    author=Max Chernoff,
+    version=0.0.0, %%version
+    github=https://github.com/gucci-on-fleek/luatools,
+]
+    \processfile{../source/luatools.lua}
+\stopdocument
