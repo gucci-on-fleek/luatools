@@ -131,10 +131,11 @@ lexer.property = {
     ['scintillua.lexers'] = path
 }
 
-local function make_colourize(code, font)
+local function make_colourize(code, font, left)
     local last = 1
     local out = node.new("kern")
     local inner = node.new("kern")
+    inner.kern = left
     return function(index, style)
         local colour
         if colours[style] then
@@ -150,13 +151,21 @@ local function make_colourize(code, font)
         for char in code:sub(last, index-1):gmatch(".") do
             if char == "\n" or char == "\r" then
                 local n = node.hpack(inner)
-                local prevdepth = node.new("glue")
-                prevdepth.width = tex.baselineskip.width - tex.prevdepth - n.height
-                prevdepth.next = n
-                out.next = prevdepth
+
+                local interlinepenalty = node.new("penalty")
+                interlinepenalty.penalty = tex.interlinepenalty
+
+                local baselineskip = node.new("glue")
+                baselineskip.width = tex.baselineskip.width - tex.prevdepth - n.height
                 tex.prevdepth = n.depth
+
+                interlinepenalty.next = baselineskip
+                baselineskip.next = n
+                out.next = interlinepenalty
                 out = n
+
                 inner = node.new("kern")
+                inner.kern = left
             else
                 local n = node.new("glyph")
                 n.char = string.byte(char)
@@ -172,11 +181,11 @@ local function make_colourize(code, font)
 end
 
 
-local function highlight(lang, code, font)
+local function highlight(lang, code, font, left)
     code = code:gsub("%s*$", "\n")
     local lexer = lexer.load(lang)
     local tokens = lexer:lex(code)
-    colourize, out = make_colourize(code, font)
+    colourize, out = make_colourize(code, font, left or 0)
 
     colourize(1, tokens[1])
     for i = 2, #tokens, 2 do
