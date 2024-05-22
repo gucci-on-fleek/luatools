@@ -5,13 +5,27 @@
 --= Before we can do anything else, we need to run some various initialization
 --= steps.
 
--- Make sure we haven't already been loaded.
+--= \subsection{Loading}
+--=
+--= Make sure we haven't already been loaded.
 
 if luatools then
     return luatools
 end
 
 
+--= We require \typ{luaotfload} (for \typ{lualibs} and \typ{luatexbase}) when
+--= we're using Plain~\LuaTeX{}, so we'll load it here if it's not already
+--= loaded.
+if not package.loaded.luaotfload then
+    tex.runtoks(function()
+        tex.sprint[[\input luaotfload.sty]]
+    end)
+end
+
+
+--= \subsection{Local Functions}
+--=
 --= We're going to use some of the \ConTeXt{} \typ{lualibs} functions quite a
 --= bit, so we'll save some (private) local versions of them here.
 
@@ -19,7 +33,7 @@ end
 ---                       disable it for now.
 
 --= Sets the \typ{__index} metamethod of a table.
---- @overload fun(t: table, f: function): table
+--- @overload fun(t: table, f: function|table): table
 --- @overload fun(f: function): table
 local setmetatableindex = table.setmetatableindex
 
@@ -48,6 +62,8 @@ string.splitlines = string.splitlines
 --- @diagnostic enable - -
 
 
+--= \subsection{\typ{luatools}}
+--=
 --= Now, we define a global table \typ{luatools} to hold all of our defined
 --= functions.
 
@@ -225,7 +241,8 @@ function luatools.init(config)
     if self.fmt.luatexbase then
         local date
         if self.config.date then
-            date = self.config.date:gsub("-", "/") -- LaTeX expects slashed dates
+            -- LaTeX expects slashed dates
+            date = self.config.date:gsub("-", "/")
         end
         luatexbase.provides_module {
             name = self.config.name,
@@ -240,24 +257,40 @@ function luatools.init(config)
             date    = self.config.date,
             comment = self.config.description,
         }
+    else
+        -- OpTeX doesn't have a module system, so we'll just print an info
+        -- message.
+        self.msg:info(
+            "Loading version " ..
+            (self.config.version or "unknown") ..
+            " (" ..
+            (self.config.date or "unknown") ..
+            ")."
+        )
     end
-    -- Nothing to do for OpTeX.
 
     return self
 end
 
 
--- Initialize ourself
-lt = luatools.init {
-    name        = "luatools",
-    ns          = "lt",
-    version     = "0.0.0", --%%version
-    date        = "2021-07-01", --%%dashdate
-    description = "Cross-format Lua helpers."
-}
+--= Initialize ourself.
+--=
+--= We need to use \typ{setmetatableindex} here because we \typ{luatools.init}
+--= creates a copy of the \typ{luatools} table, but we're still adding new
+--= functions to it after this.
+lt = setmetatableindex(
+        luatools.init {
+        name        = "luatools",
+        ns          = "lt",
+        version     = "0.0.0", --%%version
+        date        = "2021-07-01", --%%dashdate
+        description = "Cross-format Lua helpers."
+    },
+    luatools
+)
 
 
---  Ternary operator for LuaTeX and LuaMetaTeX.
+--- Ternary operator for LuaTeX and LuaMetaTeX.
 --- @generic        T - -
 --- @param   luatex T Value if running in \LuaTeX{}.
 --- @param   lmtx   T Value if running in LuaMeta\TeX{}.
@@ -482,7 +515,7 @@ end
 
 --= \subsection{\typ{luatools.util:type}}
 --=
---= A variant of `type` that also works on userdata.
+--= A variant of \typ{type} that also works on userdata.
 
 --- @param val any   The value to get the type of
 --- @return string - The type of the value
@@ -496,9 +529,23 @@ function luatools.util:type(val)
 end
 
 
+--= \subsection{\typ{scope}}
+--=
+--= The builtin \LuaTeX{} functions use multiple inconsistent ways to set the
+--= desired scope for a function. In this module, we'll use a terminating
+--= \typ{scope} parameter that can be set to either \lua{"local"} or \lua{nil}
+--= for a local scope, or \lua{"global"} for a global scope.
+--- @alias scope "local"|"global"|nil -
+
+
 --=---------------------------------
 --= \section{Tokens (Low-Level)} ---
 --=---------------------------------
+--=
+--= The \typ{luatools.token} table is the low-level interface for working with
+--= \TeX{} tokens. It is a very thin wrapper around the \LuaTeX{} \typ{token}
+--= functions; for a more user-friendly interface, see the high-level
+--= \typ{luatools.macro} submodule.
 
 --= \subsection{Token Types}
 --=
@@ -552,10 +599,10 @@ end
 --= \subsection{\typ{luatools.token}}
 --=
 --= We define a table \typ{luatools.token} to hold all of our token functions.
---- @class luatools.token -      A table containing token functions.
---- @field self luatools         The module root.
---- @field [string] fun(...):... A wrapper around the \LuaTeX{} \typ{token}
----                              functions.
+--- @class luatools.token -            A table containing token functions.
+--- @field self luatools               The module root.
+--- @field [string] function<any, any> A wrapper around the \LuaTeX{}
+---                                    \typ{token} functions.
 luatools.token = setmetatableindex(function(t, k)
 --= LuaMeta\TeX{} removes underscores from most of its \typ{token} functions, so
 --= we'll try removing any underscores if we can't find the function.
@@ -564,17 +611,21 @@ luatools.token = setmetatableindex(function(t, k)
     return v
 end)
 
--- LMTX compatibility
-luatools.token.runtoks = luatex_lmtx(token.runtoks, token.runlocal)
+
+--= \subsection{\typ{luatools.token:run_toklist}}
+--= Runs the given function or token list register inside a new “local \TeX{}
+--= run”.
+--- @type fun(func: function<nil, nil>, local: boolean?, grouped: boolean?): nil
+luatools.token.run_toklist = luatex_lmtx(tex.runtoks, tex.runlocal)
 
 
---= \subsection{\typ{luatools.token:run_tex}}
+--= \subsection{\typ{luatools.token:run}}
 --=
 --= Runs a piece of \TeX{} code.
 
 --- @param  code any_toklist The code to run.
 --- @return nil  - -
-function luatools.token:run_tex(code)
+function luatools.token:run(code)
     self = self.self
 
     local run
@@ -584,15 +635,90 @@ function luatools.token:run_tex(code)
         run = code
     end
 
-    self.token.runtoks(function()
+    self.token.run_toklist(function()
         tex.tprint(run)
-    end)
+    end, true)
+end
+
+
+--= \subsection{\typ{luatools.token.cmd}}
+--=
+--= Gets the internal “command code”, indexed by the command name.
+--- @type table<string, integer> - -
+luatools.token.cmd = table_swapped(token.commands())
+
+
+--= \subsection{\typ{luatools.token.cached}}
+--=
+--= Gets a \TeX{} token by name and caches it for later.
+
+--- @overload fun(name: csname_tok): user_tok
+--- @overload fun(chr: integer, cmd: integer): user_tok
+local token_create = token.create
+
+--- @type fun(name: csname_tok): boolean
+local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
+
+--- @type table<string, user_tok> - -
+luatools.token.cached = lt.util:memoized(function(csname)
+    -- We don't want to cache undefined tokens
+    if token_defined(csname) then
+        return token_create(csname)
+    end
+end)
+
+--= Pre-define some special tokens
+luatools.token.cached["{"] = token_create(0, lt.token.cmd.left_brace)
+luatools.token.cached["}"] = token_create(0, lt.token.cmd.right_brace)
+
+
+--= \subsection{\typ{luatools.token:set_csname}}
+--=
+--= Sets the given csname to be equal to the given token.
+--=
+--= There's surprisingly no way to define a csname with arbitrary tokens from
+--= Lua, so we instead have to use the \tex{let} primitive from \TeX{}.
+
+--- @param  csname  string  The name of the csname.
+--- @param  tok     any_tok The token to set the csname to.
+--- @param  scope   scope   -
+--- @return nil     -       -
+function luatools.token:set_csname(csname, tok, scope)
+    self = self.self
+
+    -- We need to define a token with the provided csname first, otherwise we
+    -- get an `undefined_cs`-type token, which can't be passed to TeX without
+    -- throwing an error.
+    self.token.set_char(csname, 0)
+
+    -- We can't mix strings and tokens together in a token list, so if we're
+    -- given a `csname_tok`, we need to convert it to a `user_tok` first.
+    if type(tok) == "string" then
+        tok = token_create(tok)
+    end
+
+    local toks = {
+        self.token.cached["let"],
+        token_create(csname),
+        tok
+    }
+
+    if scope == "global" then
+        insert(toks, 1, self.token.cached["global"])
+    end
+
+    self.token:run(toks)
 end
 
 
 --=----------------------------------
 --= \section{Macros (High-Level)} ---
 --=----------------------------------
+--=
+--= The \typ{luatools.macro} table is the high-level interface for working with
+--= \TeX{} macros and tokens. In general, everything in this submodule returns
+--= strings; for more advanced token manipulation, see the low-level
+--= \typ{luatools.token} submodule.
 
 --- @class luatools.macro - A table containing macro functions.
 --- @field self luatools    The module root.
@@ -617,17 +743,29 @@ end
 --= Gets the expanded “replacement text” of a macro, like \tex{message} and
 --= \tex{expanded}.
 
--- TODO implement allocators
-lt.token:run_tex[[\newtoks\luatoolstoks]]
-
 --- @param  name string The name of the macro.
 --- @return string -    The expanded replacement text.
 function luatools.macro:expanded(name)
-    self = self.self
-
-    local tok = self.token.create(name)
-    -- TODO
+    --- @diagnostic disable-next-line TODO
 end
+
+
+--= \subsection{\typ{luatools.macro:super_expanded}}
+--=
+--= Fully-expands a macro by typesetting it in a box and reading the box's
+--= contents.
+
+--- @param  name string The name of the macro.
+--- @return string -    The fully-expanded replacement text.
+function luatools.macro:super_expanded(name)
+    --- @diagnostic disable-next-line TODO
+end
+
+
+--= \subsection{\typ{luatools.macro:define}}
+--=
+--= Defines a new macro.
+
 
 --=--------------------
 --= \section{Nodes} ---
