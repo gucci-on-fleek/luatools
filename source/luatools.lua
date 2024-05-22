@@ -41,6 +41,10 @@ local concat = table.concat
 --= Gets the character at a given codepoint.
 local utf_char = utf8.char
 
+--= Splits a string into lines.
+--- @type fun(s: string): table
+string.splitlines = string.splitlines
+
 --- @diagnostic enable - -
 
 
@@ -476,17 +480,167 @@ function luatools.util:memoized(func)
 end
 
 
---=----------------------------
---= \section{Node Handling} ---
---=----------------------------
+--= \subsection{\typ{luatools.util:type}}
+--=
+--= A variant of `type` that also works on userdata.
+
+--- @param val any   The value to get the type of
+--- @return string - The type of the value
+function luatools.util:type(val)
+    local meta = getmetatable(val)
+    if meta and meta.__name then
+        return meta.__name
+    else
+        return type(val)
+    end
+end
+
+
+--=---------------------------------
+--= \section{Tokens (Low-Level)} ---
+--=---------------------------------
+
+--= \subsection{Token Types}
+--=
+--= Representing tokens in \LuaTeX{} is a bit of a mess since there are 3
+--= different Lua “types” that a token can have, and most of the functions only
+--= work on one of them.
+
+--= First off, we have the userdata \typ{token} objects, which are returned by
+--= the builtin \typ{token.create} function.
+--- @alias user_tok luatex.token -
+--- @class luatex.token -  \LuaTeX{} token “userdata” objects.
+--- @field command integer The command code (catcode) of the token.
+--- @field mode    integer The mode (charcode) of the token.
+--- @field tok     integer The token number (an index into \typ{eqtb}).
+
+--= Next, given a csname as a string, we can easily get the underlying token
+--= object.
+--- @alias csname_tok string -
+
+--= Finally, a token can be represented as the the table \lua{{cmd, chr, cs}},
+--= where \typ{cmd} is the command code, \typ{chr} is the character code, and
+--= \typ{cs} is an index into the \TeX{} hash table.
+--- @class (exact) tab_tok A table representing a token.
+--- @field [1] integer     (cmd) The command code of the token.
+--- @field [2] integer     (chr) The character code of the token.
+--- @field [3] integer?    (cs)  The index into the \TeX{} hash table.
+
+--- @alias any_tok user_tok|csname_tok|tab_tok - Any type of token.
+
+
+--= \subsection{Token List Types}
+--=
+--= Single tokens are rarely useful, so we'll generally be working with “token
+--= lists” instead. Once again, there are multiple incompatible ways to
+--= represent these.
+
+--= The most basic way to represent a token list is as a table of tokens. In
+--= this format, each of the entries can either be a \typ{user_tok} or a
+--= \typ{tab_tok}.
+--- @alias tab_toklist (tab_tok | user_tok)[] -
+
+--= The other way to represent a token list is as a string that is tokenized by
+--= TeX in a function-dependent manner. These strings are generally processed
+--= either using the current catcode regime or using the “\tex{meaning}”
+--= catcodes.
+--- @alias str_toklist string -
+
+--- @alias any_toklist tab_toklist|str_toklist - Any type of token list.
+
+
+--= \subsection{\typ{luatools.token}}
+--=
+--= We define a table \typ{luatools.token} to hold all of our token functions.
+--- @class luatools.token -      A table containing token functions.
+--- @field self luatools         The module root.
+--- @field [string] fun(...):... A wrapper around the \LuaTeX{} \typ{token}
+---                              functions.
+luatools.token = setmetatableindex(function(t, k)
+--= LuaMeta\TeX{} removes underscores from most of its \typ{token} functions, so
+--= we'll try removing any underscores if we can't find the function.
+    local v = token[k] or token[k:gsub("_", "")]
+    t[k] = v
+    return v
+end)
+
+-- LMTX compatibility
+luatools.token.runtoks = luatex_lmtx(token.runtoks, token.runlocal)
+
+
+--= \subsection{\typ{luatools.token:run_tex}}
+--=
+--= Runs a piece of \TeX{} code.
+
+--- @param  code any_toklist The code to run.
+--- @return nil  - -
+function luatools.token:run_tex(code)
+    self = self.self
+
+    local run
+    if type(code) == "string" then
+        run = code:splitlines()
+    else
+        run = code
+    end
+
+    self.token.runtoks(function()
+        tex.tprint(run)
+    end)
+end
+
+
+--=----------------------------------
+--= \section{Macros (High-Level)} ---
+--=----------------------------------
+
+--- @class luatools.macro - A table containing macro functions.
+--- @field self luatools    The module root.
+luatools.macro = {}
+
+
+--= \subsection{\typ{luatools.macro:unexpanded}}
+--=
+--= Gets the raw, unexpanded “replacement text” of a macro.
+
+--- @param  name string The name of the macro.
+--- @return string -    The raw replacement text.
+function luatools.macro:unexpanded(name)
+    self = self.self
+
+    return self.token.get_macro(name)
+end
+
+
+--= \subsection{\typ{luatools.macro:expanded}}
+--=
+--= Gets the expanded “replacement text” of a macro, like \tex{message} and
+--= \tex{expanded}.
+
+-- TODO implement allocators
+lt.token:run_tex[[\newtoks\luatoolstoks]]
+
+--- @param  name string The name of the macro.
+--- @return string -    The expanded replacement text.
+function luatools.macro:expanded(name)
+    self = self.self
+
+    local tok = self.token.create(name)
+    -- TODO
+end
+
+--=--------------------
+--= \section{Nodes} ---
+--=--------------------
 --=
 --= Here, we define some functions for working with \LuaTeX{} nodes.
 
---- @class node -         \LuaTeX{} node “userdata” objects.
+--- @class luatex.node -  \LuaTeX{} node “userdata” objects.
 --- @field id      number The node's type.
 --- @field subtype number The node's subtype.
 --- @field next?   node   The next node in the list.
 --- @field prev?   node   The previous node in the list.
+--- @alias node    luatex.node
 
 --- @class luatools.node -       A table containing node functions.
 --- @field self luatools         The module root.
