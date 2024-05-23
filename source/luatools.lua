@@ -52,6 +52,9 @@ local append = table.append
 --= Concatenates a table into a string.
 local concat = table.concat
 
+--= Unpacks a table
+local unpack = table.unpack
+
 --= Gets the character at a given codepoint.
 local utf_char = utf8.char
 
@@ -69,6 +72,7 @@ string.splitlines = string.splitlines
 
 --- @class luatools -               The module class.
 --- @field config   luatools.config The module-local data.
+--- @field _name_cache table<string, csname_tok> A cache of mangled names.
 luatools = {}
 
 --= Before we can do anything else, we need to figure out what format and engine
@@ -230,9 +234,10 @@ function luatools.init(config)
     self.self = self
     config.self = self
 
+    -- Copy over all the submodules
     for k, v in pairs(luatools) do
         if type(v) == "table" then
-            v.self = self
+            rawset(v, "self", self)
         end
         self[k] = v
     end
@@ -268,6 +273,9 @@ function luatools.init(config)
             ")."
         )
     end
+
+    -- Initialize the instance-local data
+    self._name_cache = {}
 
     return self
 end
@@ -558,7 +566,9 @@ end
 --- @alias user_tok luatex.token -
 --- @class luatex.token -  \LuaTeX{} token “userdata” objects.
 --- @field command integer The command code (catcode) of the token.
+--- @field cmdname string  The name assigned to the command code.
 --- @field mode    integer The mode (charcode) of the token.
+--- @field index   integer For a \tex{REGISTERdef}ed token, the register number.
 --- @field tok     integer The token number (an index into \typ{eqtb}).
 
 --= Next, given a csname as a string, we can easily get the underlying token
@@ -659,7 +669,7 @@ local token_create = token.create
 --- @type fun(name: csname_tok): boolean
 local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
 
---- @type table<string, user_tok> - -
+--- @type table<string, user_tok?> - -
 luatools.token.cached = lt.util:memoized(function(csname)
     -- We don't want to cache undefined tokens
     if token_defined(csname) then
@@ -718,8 +728,14 @@ end
 --= The \typ{luatools.tex} table is the high-level interface for working with
 --= \TeX{} tokens and registers.
 
+-- The typechecker doesn't like the `__index` metamethod, so we need to manually
+-- forward-declare the types of the function methods.
+
 --- @class luatools.tex - A table containing \TeX{} functions.
 --- @field self luatools  The module root.
+--- @field mangle_name fun(self:self, params: _name_params): string
+--- @field [string] ((fun(...):nil))|integer|string|nil -
+---        Accessor for \TeX{} registers and macros.
 luatools.tex = {}
 
 
@@ -731,7 +747,7 @@ luatools.tex = {}
 --= “\TeX{}” name.
 
 --= Right now, we'll only support \TeX{} registers with the following types:
---- @alias register_type "dimen"|"count"
+--- @alias register_type "dimen"|"count" -
 
 --= For consistency, we're using the standard \TeX{} names for the types, so
 --= we'll need to convert them to the expl3 names if we're using expl3.
@@ -741,13 +757,23 @@ local expl_types = {
     count = "int",
 }
 
+--= \LuaTeX{} gives \tex{REGISTERdef}ed tokens specific command codes which
+--= we'll unfortunately need to hardcode.
+--- @type table<register_type, string> - -
+local texname_to_cmdname = {
+    count = "assign_int",
+    dimen = "assign_dimen",
+}
+
+local cmdname_to_texname = table_swapped(texname_to_cmdname)
+
 --= Macros aren't registers, but they still have a csname, so we'll support them
 --= in \lua{luatools.tex} too.
 --- @alias tex_type register_type|"macro"
 
 --- @class _name_params -       The parameters for the mangled name.
 --- @field name        string   The name to mangle.
---- @field type        tex_type The \TeX{} type that the name points at.
+--- @field type?       tex_type The \TeX{} type that the name points at.
 --- @field arguments?  string   An expl3 macro “signature” (the characters after
 ---                             \typ{:} in the macro name). (Default: \lua{""})
 --- @field scope?      scope    Global or local? (Default: \lua{"local"})
@@ -759,11 +785,21 @@ local expl_types = {
 function luatools.tex:mangle_name(params)
     self = self.self
 
+    -- If we've already defined this name, then just return it from the cache.
+    if self._name_cache[params.name] then
+        return self._name_cache[params.name]
+    end
+
     -- Set the defaults
     local name = params.name
     params.arguments  = params.arguments  or ""
     params.scope      = params.scope      or "local"
     params.visibility = params.visibility or "private"
+
+    if self.config.expl and not params.type then
+        lt.msg:error("You must provide a type when using expl3.")
+        return --- @diagnostic disable-line missing-return-value
+    end
 
     -- Add the namespace prefix
     name = self.config.ns .. "_" .. name
@@ -818,44 +854,259 @@ function luatools.tex:mangle_name(params)
         -- all other formats, there's nothing to do here.
     end
 
+    -- Store the mangled name in the cache, only if the token it references is
+    -- defined. (We'll sometimes use this function to see if a mangled name is
+    -- already defined, so we can't cache it unconditionally.)
+    if token_defined(name) then
+        self._name_cache[params.name] = name
+    end
+
     return name
 end
 
 
---= \subsection{\typ{luatools.tex:allocate}}
+--= \subsection{\typ{luatools.tex:new_register}}
 --=
 --= Creates a new \TeX{} register with the given parameters.
 
---= We'll cache the full “\TeX{} name” of any csname that we look up so that we
---= can avoid looking it up again in the future.
---- @type table<string, csname_tok>
-local name_cache = {}
-
 --- @param  params _name_params The parameters for the register.
 --- @return nil    -            -
-function luatools.tex:allocate(params)
+function luatools.tex:new_register(params)
     self = self.self
 
     if params.type == "macro" then
         lt.msg:error("Use ``lt.macro:define'' to define new macros.")
-        return --- @diagnostic disable-line: missing-return-value
+        return
     end
 
-    local name = self.tex:mangle_name(params)
+    -- Get the mangled name
+    local name = self._name_cache[params.name] or
+                 self.tex:mangle_name(params)
 
-    -- We don't want to allocate the same register twice
-    if token_defined(name) or name_cache[params.name] then
-        lt.msg:warning("Register " .. name .. " already allocated.")
+    -- Check if the register is already defined
+    local tok = self.token.cached[name]
+    if tok then
+        if tok.cmdname == texname_to_cmdname[params.type] then
+            -- The register is already defined with the correct type, so there's
+            -- nothing to do here.
+            return
+        else
+            lt.msg:error("Register ``" .. name .. "'' already defined.")
+        end
+    else
+        -- If it isn't already defined, then we need to define it.
+        self.token.set_char(name, 0)
     end
 
+    -- Actually create the register
     self.token:run {
         self.token.cached["new" .. params.type],
         token_create(name)
     }
 
-    name_cache[params.name] = name
+    -- Cache the name
+    self._name_cache[params.name] = name
 end
 
+
+--= \subsection{\typ{luatools.tex:_get_token}}
+--=
+--= Gets the token corresponding to the given name.
+--=
+--= To provide a user-friendly interface, we take only variable name, then
+--= check all possible mangled names for the variable.
+
+--- Helper function for \lua{luatools.tex:_get_token}.
+--- @param  given   string The requested variable name.
+--- @param  mangled string The mangled variable name.
+--- @return user_tok? -    The token corresponding to the variable.
+function luatools.tex:_get_token_aux(given, mangled)
+    self = self.self
+
+    local tok = self.token.cached[mangled]
+    if tok then
+        self._name_cache[given] = mangled
+        return tok
+    end
+end
+
+--- @param  name string The name of the variable.
+--- @return user_tok? - The token corresponding to the variable.
+function luatools.tex:_get_token(name)
+    self = self.self
+
+    -- Initialization
+    local mangled --- @type csname_tok
+    local tok --- @type user_tok?
+
+    -- Check the cache
+    mangled = self._name_cache[name]
+    if mangled then
+        return self.token.cached[mangled]
+    end
+
+    -- Check for the exact name
+    mangled = name
+    tok = self.tex:_get_token_aux(name, mangled)
+    if tok then return tok end
+
+    if self.config.expl then
+        -- We need to loop over `{public, private} × {local, global} × {*types}`
+        for _, visibility in ipairs { "public", "private" } do
+            for _, scope in ipairs { "local", "global" } do
+                local base, arguments = name:match("^(.-):(.*)$")
+                if arguments then
+                    -- Macros
+                    mangled = self.tex:mangle_name {
+                        name = base,
+                        type = "macro",
+                        arguments = arguments,
+                        scope = scope,
+                        visibility = visibility
+                    }
+                    tok = self.tex:_get_token_aux(name, mangled)
+                    if tok then return tok end
+                else
+                    -- Registers
+                    for type, _ in pairs(expl_types) do
+                        mangled = self.tex:mangle_name {
+                            name = name,
+                            type = type,
+                            scope = scope,
+                            visibility = visibility
+                        }
+                        tok = self.tex:_get_token_aux(name, mangled)
+                        if tok then return tok end
+                    end
+                end
+            end
+        end
+
+    else
+        -- Check for a private variable
+        mangled = self.tex:mangle_name {
+            name = name,
+            visibility = "private"
+        }
+        tok = self.tex:_get_token_aux(name, mangled)
+        if tok then return tok end
+
+        -- Check for a public variable
+        mangled = self.tex:mangle_name {
+            name = name,
+            visibility = "public"
+        }
+        tok = self.tex:_get_token_aux(name, mangled)
+        if tok then return tok end
+    end
+end
+
+
+--= \subsection{\typ{luatools.tex:_get}}
+--=
+--= Gets the value of the given register, or a function that calls the given
+--= macro.
+
+--- @param  name string            The name of the register or macro.
+--- @return integer|(fun(...):nil)|nil - The contents of the register or
+---                                          macro.
+function luatools.tex:_get(name)
+    self = self.self
+
+    local tok = self.tex:_get_token(name)
+    if not tok then
+        return nil
+    end
+
+    local cmdname = tok.cmdname
+    if cmdname:match("call") then
+        -- Macro
+        local outer_self = self
+        return function(...)
+            local in_args = {...}
+            local out_args = {}
+
+            local bgroup, egroup
+            if type(in_args[1]) == "string" then
+                bgroup = "{"
+                egroup = "}"
+            else
+                bgroup = outer_self.token.cached["{"]
+                egroup = outer_self.token.cached["}"]
+            end
+
+            for _, arg in ipairs(in_args) do
+                insert(out_args, bgroup)
+                insert(out_args, arg)
+                insert(out_args, egroup)
+            end
+
+            outer_self.token:run {
+                tok,
+                unpack(out_args)
+            }
+        end
+    end
+
+    local register_type = cmdname_to_texname[cmdname]
+    if register_type then
+        -- Register
+        return tex[register_type][tok.index]
+    end
+end
+
+
+--= \subsection{\typ{luatools.tex:_set}}
+--=
+--= Sets the value of the given register, or sets the given csname to a token.
+
+local dimen_to_sp = tex.sp
+
+--- @param  name string          The name of the register or csname.
+--- @param  val  any_tok|integer The value to set the register or csname to.
+--- @return nil  -               -
+function luatools.tex:_set(name, val)
+    self = self.self
+
+    local tok = self.tex:_get_token(name)
+    if not tok then
+        self.msg:error("Unknown variable ``" .. name .. "''.")
+        return
+    end
+
+    local register_type = cmdname_to_texname[tok.cmdname]
+    local val_type = self.util:type(val)
+
+    if register_type and val_type == "number" then
+        -- Register
+        tex[register_type][tok.index] = val
+        return
+    end
+
+    if register_type == "dimen" and val_type == "string" then
+        -- Dimension
+        tex[register_type][tok.index] = dimen_to_sp(val)
+        return
+    end
+
+    if val_type == "table" or
+       val_type == "luatex.token" or
+       val_type == "string"
+    then
+        -- Token
+        --- @diagnostic disable-next-line param-type-mismatch
+        self.token:set_csname(name, val)
+        return
+    end
+
+    self.msg:error("Invalid value for variable ``" .. name .. "''.")
+end
+
+
+setmetatable(luatools.tex, {
+    __index = luatools.tex._get,
+    __newindex = luatools.tex._set,
+})
 
 --=---------------------
 --= \section{Macros} ---
