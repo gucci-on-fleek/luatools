@@ -711,14 +711,158 @@ function luatools.token:set_csname(csname, tok, scope)
 end
 
 
---=----------------------------------
---= \section{Macros (High-Level)} ---
---=----------------------------------
+--=--------------------------------
+--= \section{\TeX{} Interfaces} ---
+--=--------------------------------
 --=
---= The \typ{luatools.macro} table is the high-level interface for working with
---= \TeX{} macros and tokens. In general, everything in this submodule returns
---= strings; for more advanced token manipulation, see the low-level
---= \typ{luatools.token} submodule.
+--= The \typ{luatools.tex} table is the high-level interface for working with
+--= \TeX{} tokens and registers.
+
+--- @class luatools.tex - A table containing \TeX{} functions.
+--- @field self luatools  The module root.
+luatools.tex = {}
+
+
+--= \subsection{\typ{luatools.tex:mangle_name}}
+--=
+--= Every \TeX{} format uses different naming conventions for their user-defined
+--= macros and registers, which makes it quite tricky to write cross-format
+--= code. This function converts a friendly “Lua” name into a format-specific
+--= “\TeX{}” name.
+
+--= Right now, we'll only support \TeX{} registers with the following types:
+--- @alias register_type "dimen"|"count"
+
+--= For consistency, we're using the standard \TeX{} names for the types, so
+--= we'll need to convert them to the expl3 names if we're using expl3.
+--- @type table<register_type, string> - -
+local expl_types = {
+    dimen = "dim",
+    count = "int",
+}
+
+--= Macros aren't registers, but they still have a csname, so we'll support them
+--= in \lua{luatools.tex} too.
+--- @alias tex_type register_type|"macro"
+
+--- @class _name_params -       The parameters for the mangled name.
+--- @field name        string   The name to mangle.
+--- @field type        tex_type The \TeX{} type that the name points at.
+--- @field arguments?  string   An expl3 macro “signature” (the characters after
+---                             \typ{:} in the macro name). (Default: \lua{""})
+--- @field scope?      scope    Global or local? (Default: \lua{"local"})
+--- @field visibility? "public"|"private" Public or private? (Default:
+---                                       \lua{"private"})
+
+--- @param  params _name_params The parameters for the mangled name.
+--- @return string -            The mangled name.
+function luatools.tex:mangle_name(params)
+    self = self.self
+
+    -- Set the defaults
+    local name = params.name
+    params.arguments  = params.arguments  or ""
+    params.scope      = params.scope      or "local"
+    params.visibility = params.visibility or "private"
+
+    -- Add the namespace prefix
+    name = self.config.ns .. "_" .. name
+
+    -- Convert the word separators to the appropriate character
+    if self.config.expl then
+        -- expl3 uses underscores for public and private variables, so there's
+        -- nothing to do here.
+    elseif params.visibility == "public" then
+        -- Public variables have no separators since only letters are allowed
+        -- in csnames when using normal catcodes.
+        name = name:gsub("_", "")
+    elseif self.fmt.plain or self.fmt.latex then
+        -- Plain and LaTeX use `@` as a separator for private variables.
+        name = name:gsub("_", "@")
+    else
+        -- ConTeXt and OpTeX use underscores for private variables, so there's
+        -- also nothing to do here.
+    end
+
+    -- Handle type, scope, and visibility prefixes and suffixes
+    if self.config.expl then
+        if params.type == "macro" then
+            -- Visibility prefixes:
+            if params.visibility == "private" then
+                name = "__" .. name
+            end
+
+            -- Argument suffixes:
+            name = name .. ":" .. params.arguments
+        else
+            -- Visibility prefixes:
+            if params.visibility == "private" then
+                name = "_" .. name
+            end
+
+            -- Scope prefixes:
+            if params.scope == "global" then
+                name = "g_" .. name
+            else
+                name = "l_" .. name
+            end
+
+            -- Type suffixes:
+            name = name .. "_" .. expl_types[params.type]
+        end
+    elseif self.fmt.optex and params.visibility == "private" then
+        -- Visibility prefixes:
+        name = "_" .. name
+    else
+        -- Only expl3 puts the type and scope of a variable in its name, so for
+        -- all other formats, there's nothing to do here.
+    end
+
+    return name
+end
+
+
+--= \subsection{\typ{luatools.tex:allocate}}
+--=
+--= Creates a new \TeX{} register with the given parameters.
+
+--= We'll cache the full “\TeX{} name” of any csname that we look up so that we
+--= can avoid looking it up again in the future.
+--- @type table<string, csname_tok>
+local name_cache = {}
+
+--- @param  params _name_params The parameters for the register.
+--- @return nil    -            -
+function luatools.tex:allocate(params)
+    self = self.self
+
+    if params.type == "macro" then
+        lt.msg:error("Use ``lt.macro:define'' to define new macros.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    local name = self.tex:mangle_name(params)
+
+    -- We don't want to allocate the same register twice
+    if token_defined(name) or name_cache[params.name] then
+        lt.msg:warning("Register " .. name .. " already allocated.")
+    end
+
+    self.token:run {
+        self.token.cached["new" .. params.type],
+        token_create(name)
+    }
+
+    name_cache[params.name] = name
+end
+
+
+--=---------------------
+--= \section{Macros} ---
+--=---------------------
+--=
+--= The \typ{luatools.macro} table contains functions for working with \TeX{}
+--= macros (tokens defined by \tex{def}).
 
 --- @class luatools.macro - A table containing macro functions.
 --- @field self luatools    The module root.
@@ -765,6 +909,9 @@ end
 --= \subsection{\typ{luatools.macro:define}}
 --=
 --= Defines a new macro.
+function luatools.macro:define(...)
+    --- @diagnostic disable-next-line TODO
+end
 
 
 --=--------------------
