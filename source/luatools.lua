@@ -29,8 +29,8 @@ end
 --= We're going to use some of the \ConTeXt{} \typ{lualibs} functions quite a
 --= bit, so we'll save some (private) local versions of them here.
 
---- @diagnostic disable - The typechecker hasn't heard of these functions, so we
----                       disable it for now.
+--= The typechecker hasn't heard of these functions, so we disable it for now.
+--- @diagnostic disable: undefined-field
 
 --= Sets the \typ{__index} metamethod of a table.
 --- @overload fun(t: table, f: function|table): table
@@ -55,14 +55,20 @@ local concat = table.concat
 --= Unpacks a table
 local unpack = table.unpack
 
+--= Slices a table.
+local slice = table.sub
+
 --= Gets the character at a given codepoint.
 local utf_char = utf8.char
+
+--= Gets the codepoint of a character.
+local utf_code = utf8.codepoint
 
 --= Splits a string into lines.
 --- @type fun(s: string): table
 string.splitlines = string.splitlines
 
---- @diagnostic enable - -
+--- @diagnostic enable: undefined-field
 
 
 --= \subsection{\typ{luatools}}
@@ -286,6 +292,7 @@ end
 --= We need to use \typ{setmetatableindex} here because we \typ{luatools.init}
 --= creates a copy of the \typ{luatools} table, but we're still adding new
 --= functions to it after this.
+--- @type luatools - -
 lt = setmetatableindex(
         luatools.init {
         name        = "luatools",
@@ -564,7 +571,7 @@ end
 --= First off, we have the userdata \typ{token} objects, which are returned by
 --= the builtin \typ{token.create} function.
 --- @alias user_tok luatex.token -
---- @class luatex.token -  \LuaTeX{} token “userdata” objects.
+--- @class luatex.token: userdata \LuaTeX{} token “userdata” objects.
 --- @field command integer The command code (catcode) of the token.
 --- @field cmdname string  The name assigned to the command code.
 --- @field mode    integer The mode (charcode) of the token.
@@ -578,7 +585,7 @@ end
 --= Finally, a token can be represented as the the table \lua{{cmd, chr, cs}},
 --= where \typ{cmd} is the command code, \typ{chr} is the character code, and
 --= \typ{cs} is an index into the \TeX{} hash table.
---- @class (exact) tab_tok A table representing a token.
+--- @class (exact) tab_tok: table A table representing a token.
 --- @field [1] integer     (cmd) The command code of the token.
 --- @field [2] integer     (chr) The character code of the token.
 --- @field [3] integer?    (cs)  The index into the \TeX{} hash table.
@@ -622,11 +629,99 @@ luatools.token = setmetatableindex(function(t, k)
 end)
 
 
---= \subsection{\typ{luatools.token:run_toklist}}
+--= \subsection{\typ{luatools.token:_run}}
 --= Runs the given function or token list register inside a new “local \TeX{}
 --= run”.
 --- @type fun(func: function<nil, nil>, local: boolean?, grouped: boolean?): nil
-luatools.token.run_toklist = luatex_lmtx(tex.runtoks, tex.runlocal)
+luatools.token._run = luatex_lmtx(tex.runtoks, tex.runlocal)
+
+
+--= \subsection{\typ{luatools.token:create}}
+--=
+--= Creates a new token.
+
+--= Some special constants used for macro tokens
+STRING_OFFSET_BITS = 21
+CS_TOKEN_FLAG = 0x1FFFFFFF
+
+--= Creates a token from a character code and a command code.
+--- @overload fun(name: csname_tok): user_tok
+--- @overload fun(chr: integer, cmd: integer): user_tok
+local token_create_two = token.create
+
+--= Creates a token from an \typ{any_tok}.
+---
+--- @param  tok any_tok The token to create.
+--- @return user_tok -  The created token.
+local function token_create_one(tok)
+    local tok_type = type(tok)
+
+    -- \typ{user_tok}
+    if tok_type == "userdata" and lt.util:type(tok) == "luatex.token" then
+        return tok
+
+    -- \typ{csname_tok}
+    elseif tok_type == "string" then
+        return token_create_two(tok)
+
+    -- \typ{tab_tok} for a non-macro call token
+    elseif tok_type == "table" and (not tok[3] or tok[3] == 0) then
+        return token_create_two(tok[2], tok[1])
+
+    -- \typ{tab_tok} for a macro call token
+    elseif tok_type == "table" and tok[3] ~= 0 then
+        -- There's no official interface to create a macro token
+        -- from Lua, so we need to do it manually.
+        return token_create_two(
+            tok[3] + CS_TOKEN_FLAG - (tok[1] << STRING_OFFSET_BITS),
+            tok[1]
+        )
+    else
+        lt.msg:error("Invalid token type: " .. lt.util:type(tok))
+        return --- @diagnostic disable-line: missing-return-value
+    end
+end
+
+
+--- @param  chr integer The character code of the token.
+--- @param  cmd integer The command code of the token.
+--- @return user_tok -  The created token.
+--- @overload fun(self: self, chr: any_tok): user_tok
+function luatools.token:create(chr, cmd)
+    if cmd then
+        return token_create_two(chr, cmd)
+    else
+        return token_create_one(chr --[[@as any_tok]])
+    end
+end
+
+
+--= \subsection{\typ{luatools.token:push}}
+--=
+--= Pushes a token list onto the input stack.
+
+--- @param  in_toklist any_toklist The token list to push.
+--- @return nil  - -
+function luatools.token:push(in_toklist)
+    self = self.self
+
+    local out_toklist = {}
+    if type(in_toklist) == "string" then
+        -- Handle \typ{str_toklist}s by splitting them into lines and then
+        -- passing it to \lua{tex.tprint}, which tokenizes the lines using the
+        -- current catcodes.
+        out_toklist = in_toklist:splitlines()
+
+        tex.tprint(out_toklist)
+    else
+        -- Convert \typ{tab_toklist}s into \typ{user_tok[]}s.
+        for _, tok in ipairs(in_toklist) do
+            insert(out_toklist, self.token:create(tok))
+        end
+
+        self.token.put_next(out_toklist)
+    end
+end
 
 
 --= \subsection{\typ{luatools.token:run}}
@@ -638,15 +733,8 @@ luatools.token.run_toklist = luatex_lmtx(tex.runtoks, tex.runlocal)
 function luatools.token:run(code)
     self = self.self
 
-    local run
-    if type(code) == "string" then
-        run = code:splitlines()
-    else
-        run = code
-    end
-
-    self.token.run_toklist(function()
-        tex.tprint(run)
+    self.token._run(function()
+        self.token:push(code)
     end, true)
 end
 
@@ -662,10 +750,6 @@ luatools.token.cmd = table_swapped(token.commands())
 --=
 --= Gets a \TeX{} token by name and caches it for later.
 
---- @overload fun(name: csname_tok): user_tok
---- @overload fun(chr: integer, cmd: integer): user_tok
-local token_create = token.create
-
 --- @type fun(name: csname_tok): boolean
 local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
 
@@ -673,13 +757,13 @@ local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
 luatools.token.cached = lt.util:memoized(function(csname)
     -- We don't want to cache undefined tokens
     if token_defined(csname) then
-        return token_create(csname)
+        return lt.token:create(csname)
     end
 end)
 
 --= Pre-define some special tokens
-luatools.token.cached["{"] = token_create(0, lt.token.cmd.left_brace)
-luatools.token.cached["}"] = token_create(0, lt.token.cmd.right_brace)
+luatools.token.cached["{"] = lt.token:create(0, lt.token.cmd.left_brace)
+luatools.token.cached["}"] = lt.token:create(0, lt.token.cmd.right_brace)
 
 
 --= \subsection{\typ{luatools.token:set_csname}}
@@ -704,12 +788,12 @@ function luatools.token:set_csname(csname, tok, scope)
     -- We can't mix strings and tokens together in a token list, so if we're
     -- given a `csname_tok`, we need to convert it to a `user_tok` first.
     if type(tok) == "string" then
-        tok = token_create(tok)
+        tok = self.token:create(tok)
     end
 
     local toks = {
         self.token.cached["let"],
-        token_create(csname),
+        self.token:create(csname),
         tok
     }
 
@@ -718,6 +802,126 @@ function luatools.token:set_csname(csname, tok, scope)
     end
 
     self.token:run(toks)
+end
+
+
+--= \subsection{\typ{luatools.token:set_toks_register}}
+--=
+--= Sets a \tex{toks} register to the given token list.
+
+--- @class node.whatsit: luatex.node A whatsit node.
+--- @field type?  user_whatsit_type For a \tex{user_defined} whatsit, its type.
+--- @field value? any               For a \tex{user_defined} whatsit, its value.
+
+--= A \typ{user_defined} whatsit node that we can use to convert between
+--= various internal \LuaTeX{} datatypes.
+--- @type node.whatsit - -
+local scratch_user_whatsit = node.new("whatsit", "user_defined")
+
+--= The possible types of a \tex{user_defined} whatsit node.
+--- @enum user_whatsit_type
+local user_whatsit_types = {
+    attribute = utf_code "a",
+    integer   = utf_code "d",
+    lua       = utf_code "l",
+    node      = utf_code "n",
+    string    = utf_code "s",
+    toklist   = utf_code "t",
+}
+
+--= Stores a \typ{tab_toklist} in a “fake” \tex{toks} register (without giving
+--= it a name).
+---
+--- @param  toklist tab_toklist The token list to store.
+--- @return user_tok -          A token representing the fake register.
+local function toklist_to_faketoks(toklist)
+    local temp_char = lt.tex:mangle_name {
+        name = "temp_char",
+        visibility = "private",
+        type = "toks", -- Close enough...
+    }
+
+    -- We need to save the token list into the \TeX{} hash table to be able to
+    -- access it in \TeX{}.
+    scratch_user_whatsit.type = user_whatsit_types.toklist
+    scratch_user_whatsit.value = toklist
+    scratch_user_whatsit.type = user_whatsit_types.integer
+    local tok_id = scratch_user_whatsit.value
+
+
+    -- \TeX{} expects two levels of indirection for a \tex{toks} token, so we
+    -- first point a \tex{chardef} token to the token stored above.
+    lt.token.set_char(temp_char, tok_id)
+
+    -- Then, we create a “fake” \tex{toks} token that points to the
+    -- \tex{chardef} token.
+    return lt.token:create(
+        lt.token:create(temp_char).tok - CS_TOKEN_FLAG,
+        lt.token.cmd.assign_toks
+    )
+end
+
+
+--= Copies a fake \tex{toks} token into a real \tex{toks} register.
+--=
+--= The token created by \typ{let_csname_token} is a semi-valid \tex{toks}
+--= register: it behaves like a \tex{toks} register with \tex{the} and similar,
+--= but it gives a (mostly harmless) error with \tex{show} and \tex{meaning}.
+--= To fix this, we copy the token's contents into a real \tex{toks} register.
+---
+--- @param  name     csname_tok The name of the register.
+--- @param  fake_tok user_tok   The fake \tex{toks} register.
+--- @return nil  -          -
+local function token_to_toks_register(name, fake_tok)
+    -- Clear the register
+    tex.toks[name] = ""
+
+    local fake_tok_name = lt.tex:mangle_name {
+        name = "temp_fake_toks",
+        type = "toks",
+        visibility = "private",
+    }
+    lt.token:set_csname(fake_tok_name, fake_tok) -- TODO use proper naming
+
+    -- Prepend the fake \tex{toks} register onto the empty real one, giving
+    -- us a real \tex{toks} register with the correct value.
+    lt.token:run {
+        lt.token.cached["tokspre"],
+        lt.token:create(name),
+        lt.token:create(fake_tok_name),
+    }
+end
+
+
+--- @param  name    csname_tok The name of the register.
+--- @param  toklist tab_toklist The token list to store.
+--- @return nil -          -
+function luatools.token:set_toks_register(name, toklist)
+    local fake_tok = toklist_to_faketoks(toklist)
+    token_to_toks_register(name, fake_tok)
+end
+
+
+--= \subsection{\typ{luatools.token:toklist_to_str}}
+--=
+--= Converts a token list to a string.
+
+--- @param  toklist tab_toklist The token list to convert.
+--- @return string -            The string representation of the token list.
+function luatools.token:toklist_to_str(toklist)
+    self = self.self
+
+    -- Allocate a new token register
+    local name = lt.tex:new_register {
+        name = "temp_real_toks",
+        type = "toks",
+        visibility = "private",
+    }
+
+    -- Store the token list in the register
+    self.token:set_toks_register(name, toklist)
+
+    return lt.tex.temp_real_toks --[[@as string]]
 end
 
 
@@ -734,6 +938,8 @@ end
 --- @class luatools.tex - A table containing \TeX{} functions.
 --- @field self luatools  The module root.
 --- @field mangle_name fun(self:self, params: _name_params): string
+--- @field new_register fun(self:self, params: _name_params): string
+--- @field _get_token fun(self:self, name: string): user_tok, csname_tok
 --- @field [string] ((fun(...):nil))|integer|string|nil -
 ---        Accessor for \TeX{} registers and macros.
 luatools.tex = {}
@@ -747,7 +953,7 @@ luatools.tex = {}
 --= “\TeX{}” name.
 
 --= Right now, we'll only support \TeX{} registers with the following types:
---- @alias register_type "dimen"|"count" -
+--- @alias register_type "dimen"|"count"|"toks" -
 
 --= For consistency, we're using the standard \TeX{} names for the types, so
 --= we'll need to convert them to the expl3 names if we're using expl3.
@@ -755,6 +961,7 @@ luatools.tex = {}
 local expl_types = {
     dimen = "dim",
     count = "int",
+    toks  = "toks",
 }
 
 --= \LuaTeX{} gives \tex{REGISTERdef}ed tokens specific command codes which
@@ -763,9 +970,11 @@ local expl_types = {
 local texname_to_cmdname = {
     count = "assign_int",
     dimen = "assign_dimen",
+    toks  = "assign_toks",
 }
 
-local cmdname_to_texname = table_swapped(texname_to_cmdname)
+local cmdname_to_texname = table_swapped(texname_to_cmdname) --[[
+    @as table<string, register_type> ]]
 
 --= Macros aren't registers, but they still have a csname, so we'll support them
 --= in \lua{luatools.tex} too.
@@ -798,7 +1007,7 @@ function luatools.tex:mangle_name(params)
 
     if self.config.expl and not params.type then
         lt.msg:error("You must provide a type when using expl3.")
-        return --- @diagnostic disable-line missing-return-value
+        return --- @diagnostic disable-line: missing-return-value
     end
 
     -- Add the namespace prefix
@@ -870,13 +1079,13 @@ end
 --= Creates a new \TeX{} register with the given parameters.
 
 --- @param  params _name_params The parameters for the register.
---- @return nil    -            -
+--- @return csname_tok name     The mangled name of the register.
 function luatools.tex:new_register(params)
     self = self.self
 
     if params.type == "macro" then
         lt.msg:error("Use ``lt.macro:define'' to define new macros.")
-        return
+        return --- @diagnostic disable-line: missing-return-value
     end
 
     -- Get the mangled name
@@ -889,7 +1098,7 @@ function luatools.tex:new_register(params)
         if tok.cmdname == texname_to_cmdname[params.type] then
             -- The register is already defined with the correct type, so there's
             -- nothing to do here.
-            return
+            return name
         else
             lt.msg:error("Register ``" .. name .. "'' already defined.")
         end
@@ -901,11 +1110,13 @@ function luatools.tex:new_register(params)
     -- Actually create the register
     self.token:run {
         self.token.cached["new" .. params.type],
-        token_create(name)
+        self.token:create(name)
     }
 
     -- Cache the name
     self._name_cache[params.name] = name
+
+    return name
 end
 
 
@@ -930,8 +1141,9 @@ function luatools.tex:_get_token_aux(given, mangled)
     end
 end
 
---- @param  name string The name of the variable.
---- @return user_tok? - The token corresponding to the variable.
+--- @param  name string         The name of the variable.
+--- @return user_tok?   tok     The token corresponding to the variable.
+--- @return csname_tok? mangled The mangled name of the variable.
 function luatools.tex:_get_token(name)
     self = self.self
 
@@ -942,13 +1154,13 @@ function luatools.tex:_get_token(name)
     -- Check the cache
     mangled = self._name_cache[name]
     if mangled then
-        return self.token.cached[mangled]
+        return self.token.cached[mangled], mangled
     end
 
     -- Check for the exact name
     mangled = name
     tok = self.tex:_get_token_aux(name, mangled)
-    if tok then return tok end
+    if tok then return tok, mangled end
 
     if self.config.expl then
         -- We need to loop over `{public, private} × {local, global} × {*types}`
@@ -965,7 +1177,7 @@ function luatools.tex:_get_token(name)
                         visibility = visibility
                     }
                     tok = self.tex:_get_token_aux(name, mangled)
-                    if tok then return tok end
+                    if tok then return tok, mangled end
                 else
                     -- Registers
                     for type, _ in pairs(expl_types) do
@@ -976,12 +1188,11 @@ function luatools.tex:_get_token(name)
                             visibility = visibility
                         }
                         tok = self.tex:_get_token_aux(name, mangled)
-                        if tok then return tok end
+                        if tok then return tok, mangled end
                     end
                 end
             end
         end
-
     else
         -- Check for a private variable
         mangled = self.tex:mangle_name {
@@ -989,7 +1200,7 @@ function luatools.tex:_get_token(name)
             visibility = "private"
         }
         tok = self.tex:_get_token_aux(name, mangled)
-        if tok then return tok end
+        if tok then return tok, mangled end
 
         -- Check for a public variable
         mangled = self.tex:mangle_name {
@@ -997,8 +1208,8 @@ function luatools.tex:_get_token(name)
             visibility = "public"
         }
         tok = self.tex:_get_token_aux(name, mangled)
-        if tok then return tok end
-    end
+        if tok then return tok, mangled end
+    end --- @diagnostic disable-line: missing-return
 end
 
 
@@ -1009,7 +1220,7 @@ end
 
 --- @param  name string            The name of the register or macro.
 --- @return integer|(fun(...):nil)|nil - The contents of the register or
----                                          macro.
+---                                      macro.
 function luatools.tex:_get(name)
     self = self.self
 
@@ -1062,13 +1273,14 @@ end
 
 local dimen_to_sp = tex.sp
 
---- @param  name string          The name of the register or csname.
---- @param  val  any_tok|integer The value to set the register or csname to.
+--- @param  name string                      The name of the register or csname.
+--- @param  val  any_tok|integer|tab_toklist The value to set the register or
+---                                          csname to.
 --- @return nil  -               -
 function luatools.tex:_set(name, val)
     self = self.self
 
-    local tok = self.tex:_get_token(name)
+    local tok, name = self.tex:_get_token(name)
     if not tok then
         self.msg:error("Unknown variable ``" .. name .. "''.")
         return
@@ -1077,25 +1289,33 @@ function luatools.tex:_set(name, val)
     local register_type = cmdname_to_texname[tok.cmdname]
     local val_type = self.util:type(val)
 
-    if register_type and val_type == "number" then
-        -- Register
+    -- Set directly
+    if ((register_type == "dimen" or register_type == "count")
+        and val_type == "number") or
+       (register_type == "toks" and val_type == "string")
+    then
         tex[register_type][tok.index] = val
         return
     end
 
+    -- Handle dimensions given like "2em"
     if register_type == "dimen" and val_type == "string" then
-        -- Dimension
         tex[register_type][tok.index] = dimen_to_sp(val)
         return
     end
 
+    -- Handle setting a \tex{toks} register to a token table
+    if register_type == "toks" and val_type == "table" then
+        self.token:set_toks_register(name, val --[[@as tab_toklist]])
+        return
+    end
+
+    -- Fallback to setting a csname to a token
     if val_type == "table" or
        val_type == "luatex.token" or
        val_type == "string"
     then
-        -- Token
-        --- @diagnostic disable-next-line param-type-mismatch
-        self.token:set_csname(name, val)
+        self.token:set_csname(name, val --[[@as any_tok]])
         return
     end
 
@@ -1103,10 +1323,13 @@ function luatools.tex:_set(name, val)
 end
 
 
+--= Make \typ{luatools.tex:_get} and \typ{luatools.tex:_set} metamethods on
+--= \typ{luatools.tex}.
 setmetatable(luatools.tex, {
     __index = luatools.tex._get,
     __newindex = luatools.tex._set,
 })
+
 
 --=---------------------
 --= \section{Macros} ---
@@ -1122,10 +1345,10 @@ luatools.macro = {}
 
 --= \subsection{\typ{luatools.macro:unexpanded}}
 --=
---= Gets the raw, unexpanded “replacement text” of a macro.
+--= Gets the raw, unexpanded “replacement text” of a macro as a string.
 
---- @param  name string The name of the macro.
---- @return string -    The raw replacement text.
+--- @param  name csname_tok The csname of the macro.
+--- @return string -        The raw replacement text.
 function luatools.macro:unexpanded(name)
     self = self.self
 
@@ -1133,15 +1356,145 @@ function luatools.macro:unexpanded(name)
 end
 
 
+--= \subsection{\typ{luatools.macro:to_toklist}}
+--=
+--= Gets the raw, unexpanded “replacement text” of a macro as an array of
+--= tokens.
+
+--= Gets a token list representing the full \tex{meaning} of a macro, with
+--= with catcodes and such intact.
+---
+--- @param  name csname_tok The csname of the macro.
+--- @return tab_toklist -   The \tex{meaning} of the macro.
+local function macro_to_toklist(name)
+    -- Get the token for the macro
+    local macro = lt.token:create(name)
+
+    if not macro.cmdname:match("call") then
+        lt.msg:error("``" .. name .. "'' is not a macro.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    -- We use a \typ{user_defined} whatsit node to convert the macro to a token
+    -- list.
+    scratch_user_whatsit.type  = user_whatsit_types.integer
+    scratch_user_whatsit.value = macro.mode
+    scratch_user_whatsit.type  = user_whatsit_types.toklist
+
+    return scratch_user_whatsit.value
+end
+
+
+-- Character code constants
+local first_digit_chrcode = utf_code "0"
+local hash_chrcode        = utf_code "#"
+
+--= Splits a macro definition token list into its parameters and its
+--= replacement text.
+--- @param  toklist tab_toklist The token list of the macro's \tex{meaning}.
+--- @return tab_toklist params  The parameters of the macro.
+--- @return tab_toklist body    The replacement text of the macro.
+local function split_macro_meaning(toklist)
+    local stop_index
+    local args_count = 0
+
+    for i, t in ipairs(toklist) do
+        -- Separator between parameters and replacement text (represented by
+        -- "->" inside of \meaning).
+        if t[1] == lt.token.cmd.stop then
+            stop_index = i
+
+        -- Convert a macro parameter token in the body back into a "#"
+        -- token.
+        elseif t[1] == lt.token.cmd.mac_param and t[3] == 0 then
+            table.insert(
+                toklist,
+                i + 1,
+                { lt.token.cmd.mac_param, hash_chrcode, 1 }
+            )
+        elseif t[1] == lt.token.cmd.mac_param and t[3] == 1 then
+            t[3] = 0
+
+        -- Convert a macro parameter token in the body back into a <digit>
+        -- token.
+        elseif t[1] == lt.token.cmd.car_ret then
+            table.insert(
+                toklist,
+                i + 1,
+                { lt.token.cmd.other_char, first_digit_chrcode + t[2], 0 }
+            )
+            t[2] = hash_chrcode
+            t[1] = lt.token.cmd.mac_param
+
+        -- Convert a macro parameter token in the parameters back into a
+        -- pair of tokens {"#", <digit>}.
+        elseif t[1] == lt.token.cmd.par_end then
+            args_count = args_count + 1
+            t[1] = lt.token.cmd.mac_param
+            t[2] = hash_chrcode
+            table.insert(
+                toklist,
+                i + 1,
+                { lt.token.cmd.other_char, first_digit_chrcode + args_count, 0 }
+            )
+        end
+    end
+
+    -- Split the token table
+    return slice(toklist, 2,              stop_index - 1),
+           slice(toklist, stop_index + 1, nil           )
+end
+
+
+--- @param  name csname_tok The csname of the macro.
+--- @return tab_toklist -   The replacement text of the macro.
+function luatools.macro:to_toklist(name)
+    local meaning = macro_to_toklist(name)
+    local params, body = split_macro_meaning(meaning)
+
+    return body
+end
+
+
+--= \subsection{\typ{luatools.macro:expanded_toks}}
+--=
+--= Gets the expanded “replacement text” of a macro as a token list, like
+--= \tex{expanded} would do.
+
+--- @param  name csname_tok The csname of the macro.
+--- @return tab_toklist -   The expanded replacement text.
+function luatools.macro:expanded_toks(name)
+    self = self.self
+
+    -- Prepare the token list
+    local in_toklist = self.macro:to_toklist(name)
+    insert(in_toklist, 1, self.token.cached["{"])
+    insert(in_toklist, self.token.cached["}"])
+
+    local out_toklist --- @type tab_toklist
+    self.token._run(function()
+        self.token:push(in_toklist)
+        out_toklist = self.token.scan_toks(false, true)
+    end, true)
+
+    return out_toklist
+end
+
+
 --= \subsection{\typ{luatools.macro:expanded}}
 --=
---= Gets the expanded “replacement text” of a macro, like \tex{message} and
---= \tex{expanded}.
+--= Gets the expanded “replacement text” of a macro as a string, like
+--= \tex{message} would do.
 
---- @param  name string The name of the macro.
---- @return string -    The expanded replacement text.
+--- @param  name csname_tok The csname of the macro.
+--- @return string -        The expanded replacement text.
 function luatools.macro:expanded(name)
-    --- @diagnostic disable-next-line TODO
+    self = self.self
+
+    local toks = self.macro:expanded_toks(name)
+    local str = self.token:toklist_to_str(toks)
+
+    return str
 end
 
 
@@ -1150,8 +1503,8 @@ end
 --= Fully-expands a macro by typesetting it in a box and reading the box's
 --= contents.
 
---- @param  name string The name of the macro.
---- @return string -    The fully-expanded replacement text.
+--- @param  name csname_tok The csname of the macro.
+--- @return string -        The fully-expanded replacement text.
 function luatools.macro:super_expanded(name)
     --- @diagnostic disable-next-line TODO
 end
@@ -1171,11 +1524,11 @@ end
 --=
 --= Here, we define some functions for working with \LuaTeX{} nodes.
 
---- @class luatex.node -  \LuaTeX{} node “userdata” objects.
---- @field id      number The node's type.
---- @field subtype number The node's subtype.
---- @field next?   node   The next node in the list.
---- @field prev?   node   The previous node in the list.
+--- @class luatex.node: userdata \LuaTeX{} node “userdata” objects.
+--- @field id      number  The node's type.
+--- @field subtype number  The node's subtype.
+--- @field next?   node    The next node in the list.
+--- @field prev?   node    The previous node in the list.
 --- @alias node    luatex.node
 
 --- @class luatools.node -       A table containing node functions.
