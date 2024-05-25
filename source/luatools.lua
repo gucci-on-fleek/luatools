@@ -29,24 +29,16 @@ end
 --= We're going to use some of the \ConTeXt{} \typ{lualibs} functions quite a
 --= bit, so we'll save some (private) local versions of them here.
 
---= The typechecker hasn't heard of these functions, so we disable it for now.
---- @diagnostic disable: undefined-field
-
 --= Sets the \typ{__index} metamethod of a table.
---- @overload fun(t: table, f: function|table): table
---- @overload fun(f: function): table
 local setmetatableindex = table.setmetatableindex
 
 --= Does \lua{{ "a", "b", "c" }} \to \lua{{ a = 1, b = 2, c = 3 }}
---- @generic K,V - -
---- @type fun(t: table<K, V>): table<V, K>
 local table_swapped = table.swapped
 
 --= Inserts a value into a table.
 local insert = table.insert
 
 --= Appends a table to another table, in place.
---- @type fun(a: table, b: table): table
 local append = table.append
 
 --= Concatenates a table into a string.
@@ -63,12 +55,6 @@ local utf_char = utf8.char
 
 --= Gets the codepoint of a character.
 local utf_code = utf8.codepoint
-
---= Splits a string into lines.
---- @type fun(s: string): table
-string.splitlines = string.splitlines
-
---- @diagnostic enable: undefined-field
 
 
 --= \subsection{\typ{luatools}}
@@ -570,13 +556,7 @@ end
 
 --= First off, we have the userdata \typ{token} objects, which are returned by
 --= the builtin \typ{token.create} function.
---- @alias user_tok luatex.token -
---- @class luatex.token: userdata \LuaTeX{} token “userdata” objects.
---- @field command integer The command code (catcode) of the token.
---- @field cmdname string  The name assigned to the command code.
---- @field mode    integer The mode (charcode) of the token.
---- @field index   integer For a \tex{REGISTERdef}ed token, the register number.
---- @field tok     integer The token number (an index into \typ{eqtb}).
+--- @alias user_tok luatex.token
 
 --= Next, given a csname as a string, we can easily get the underlying token
 --= object.
@@ -809,14 +789,10 @@ end
 --=
 --= Sets a \tex{toks} register to the given token list.
 
---- @class node.whatsit: luatex.node A whatsit node.
---- @field type?  user_whatsit_type For a \tex{user_defined} whatsit, its type.
---- @field value? any               For a \tex{user_defined} whatsit, its value.
-
 --= A \typ{user_defined} whatsit node that we can use to convert between
 --= various internal \LuaTeX{} datatypes.
---- @type node.whatsit - -
-local scratch_user_whatsit = node.new("whatsit", "user_defined")
+local scratch_user_whatsit = node.new("whatsit", "user_defined") --[[
+    @as user_whatsit]]
 
 --= The possible types of a \tex{user_defined} whatsit node.
 --- @enum user_whatsit_type
@@ -1300,6 +1276,7 @@ function luatools.tex:_set(name, val)
 
     -- Handle dimensions given like "2em"
     if register_type == "dimen" and val_type == "string" then
+        --- @cast val string
         tex[register_type][tok.index] = dimen_to_sp(val)
         return
     end
@@ -1381,7 +1358,7 @@ local function macro_to_toklist(name)
     scratch_user_whatsit.value = macro.mode
     scratch_user_whatsit.type  = user_whatsit_types.toklist
 
-    return scratch_user_whatsit.value
+    return scratch_user_whatsit.value --[[@as tab_toklist]]
 end
 
 
@@ -1524,12 +1501,8 @@ end
 --=
 --= Here, we define some functions for working with \LuaTeX{} nodes.
 
---- @class luatex.node: userdata \LuaTeX{} node “userdata” objects.
---- @field id      number  The node's type.
---- @field subtype number  The node's subtype.
---- @field next?   node    The next node in the list.
---- @field prev?   node    The previous node in the list.
---- @alias node    luatex.node
+--- @alias node luatex.node
+--- @alias user_whatsit luatex.node.whatsit.user_defined
 
 --- @class luatools.node -       A table containing node functions.
 --- @field self luatools         The module root.
