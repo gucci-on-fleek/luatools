@@ -14,13 +14,19 @@ if luatools then
 end
 
 
---= We require \typ{luaotfload} (for \typ{lualibs} and \typ{luatexbase}) when
---= we're using Plain~\LuaTeX{}, so we'll load it here if it's not already
---= loaded.
+--= We require \typ{luaotfload} (for \typ{lualibs} and \typ{luatexbase}), but
+--= Plain~\LuaTeX{} and Op\TeX{} don't always have it loaded, so we'll load it
+--= here if it's not already loaded.
 if not package.loaded.luaotfload then
-    tex.runtoks(function()
-        tex.sprint[[\input luaotfload.sty]]
-    end)
+    if optex then
+        tex.runtoks(function()
+            tex.sprint[[\_initunifonts]]
+        end)
+    else
+        tex.runtoks(function()
+            tex.sprint[[\input luaotfload.sty]]
+        end)
+    end
 end
 
 
@@ -62,7 +68,10 @@ local utf_code = utf8.codepoint
 --= Now, we define a global table \typ{luatools} to hold all of our defined
 --= functions.
 
---- @class luatools -               The module class.
+--- @class _lt_base      The base for all luatools submodules.
+--- @field self luatools The module root.
+
+--- @class luatools: _lt_base       The module class.
 --- @field config   luatools.config The module-local data.
 --- @field _name_cache table<string, csname_tok> A cache of mangled names.
 luatools = {}
@@ -196,16 +205,15 @@ local lt
 --=     }
 --= \stopcode
 
---- @class luatools.config   -   A table containing module-local data.
---- @field name         string   The name of the module.
---- @field ns?          string   The namespace of the module.
---- @field version?     string   The version of the module.
---- @field date?        string   The date of the module, in the format
----                              \typ{YYYY-MM-DD}.
---- @field description? string   A short description of the module.
---- @field debug?       boolean  Whether to show debug messages.
---- @field expl?        boolean  Whether to use \LaTeX{} expl3 conventions.
---- @field self?        luatools The module root.
+--- @class luatools.config: _lt_base A table containing module-local data.
+--- @field name         string  The name of the module.
+--- @field ns?          string  The namespace of the module.
+--- @field version?     string  The version of the module.
+--- @field date?        string  The date of the module, in the format
+---                             \typ{YYYY-MM-DD}.
+--- @field description? string  A short description of the module.
+--- @field debug?       boolean Whether to show debug messages.
+--- @field expl?        boolean Whether to use \LaTeX{} expl3 conventions.
 
 --- @param  config   luatools.config A table containing module-local data.
 --- @return luatools lt              A new instance of the module.
@@ -220,21 +228,19 @@ function luatools.init(config)
     config.expl  = config.expl or false
 
     -- Create a new table
-    local self = { config = config }
+    local self = table.copy(luatools)
+    self.config = config
 
     -- Make sure that there's always a pointer to the root table
     self.self = self
-    config.self = self
 
-    -- Copy over all the submodules
-    for k, v in pairs(luatools) do
-        if type(v) == "table" then
-            rawset(v, "self", self)
+    for _, submodule in pairs(self) do
+        if type(submodule) == "table" then
+            rawset(submodule, "self", self)
         end
-        self[k] = v
     end
 
-    -- Initialize by engine
+    -- Print the module name and info to the log file
     if self.fmt.luatexbase then
         local date
         if self.config.date then
@@ -247,16 +253,7 @@ function luatools.init(config)
             version = self.config.version,
             description = self.config.description,
         }
-    elseif self.fmt.context then
-        modules = modules or {}
-        modules[self.config.name] = {
-            version = self.config.version,
-            date    = self.config.date,
-            comment = self.config.description,
-        }
     else
-        -- OpTeX doesn't have a module system, so we'll just print an info
-        -- message.
         self.msg:info(
             "Loading version " ..
             (self.config.version or "unknown") ..
@@ -265,6 +262,14 @@ function luatools.init(config)
             ")."
         )
     end
+
+    -- Register the module with the module system
+    modules = modules or {}
+    modules[self.config.name] = {
+        version = self.config.version,
+        date    = self.config.date,
+        comment = self.config.description,
+    }
 
     -- Initialize the instance-local data
     self._name_cache = {}
@@ -275,19 +280,35 @@ end
 
 --= Initialize ourself.
 --=
---= We need to use \typ{setmetatableindex} here because we \typ{luatools.init}
+--= We need to use \typ{setmetatableindex} here because \typ{luatools.init}
 --= creates a copy of the \typ{luatools} table, but we're still adding new
 --= functions to it after this.
 --- @type luatools - -
 lt = setmetatableindex(
-        luatools.init {
+    luatools.init {
         name        = "luatools",
         ns          = "lt",
         version     = "0.0.0", --%%version
         date        = "2021-07-01", --%%dashdate
         description = "Cross-format Lua helpers."
     },
-    luatools
+    function(lt, k)
+        local submodule = luatools[k]
+        local submodule_indexer = (getmetatable(submodule) or {}).__index
+
+        local v = setmetatableindex(
+            submodule,
+            function(tt, kk)
+                if kk == "self" then
+                    return lt
+                elseif submodule_indexer then
+                    return submodule_indexer(tt, kk)
+                end
+            end
+        )
+        lt[k] = v
+        return v
+    end
 )
 
 
@@ -311,8 +332,7 @@ end
 --=
 --= Here, we define some functions used for printing messages.
 
---- @class luatools.msg - A table containing message functions.
---- @field self luatools  The module root.
+--- @class luatools.msg: _lt_base A table containing message functions.
 luatools.msg = {}
 
 
@@ -471,13 +491,13 @@ function luatools.msg:error(msg)
     if self.fmt.luatexbase then
         local name = self.config.name
 
-        function luatools.msg:error(msg)
+        function self.msg:error(msg)
             luatexbase.module_error(name, msg)
         end
     else
         -- For ConTeXt and OpTeX, just use a raw Lua error.
         local start = self.config.name .. " Error: "
-        function luatools.msg:error(msg)
+        function self.msg:error(msg)
             error(start .. msg, 2)
         end
     end
@@ -492,8 +512,7 @@ end
 --=
 --= Here, we define some general-purpose utility functions.
 
---- @class luatools.util - A table containing utility functions.
---- @field self luatools  The module root.
+--- @class luatools.util: _lt_base A table containing utility functions.
 luatools.util = {}
 
 
@@ -596,8 +615,7 @@ end
 --= \subsection{\typ{luatools.token}}
 --=
 --= We define a table \typ{luatools.token} to hold all of our token functions.
---- @class luatools.token -            A table containing token functions.
---- @field self luatools               The module root.
+--- @class luatools.token: _lt_base    A table containing token functions.
 --- @field [string] function<any, any> A wrapper around the \LuaTeX{}
 ---                                    \typ{token} functions.
 luatools.token = setmetatableindex(function(t, k)
@@ -625,15 +643,16 @@ STRING_OFFSET_BITS = 21
 CS_TOKEN_FLAG = 0x1FFFFFFF
 
 --= Creates a token from a character code and a command code.
---- @overload fun(name: csname_tok): user_tok
---- @overload fun(chr: integer, cmd: integer): user_tok
-local token_create_two = token.create
+local token_create_chrcmd = token.new
+
+--= Creates a token from a \typ{csname_tok}.
+local token_create_csname = token.create
 
 --= Creates a token from an \typ{any_tok}.
 ---
 --- @param  tok any_tok The token to create.
 --- @return user_tok -  The created token.
-local function token_create_one(tok)
+local function token_create_any(tok)
     local tok_type = type(tok)
 
     -- \typ{user_tok}
@@ -642,17 +661,17 @@ local function token_create_one(tok)
 
     -- \typ{csname_tok}
     elseif tok_type == "string" then
-        return token_create_two(tok)
+        return token_create_csname(tok)
 
     -- \typ{tab_tok} for a non-macro call token
     elseif tok_type == "table" and (not tok[3] or tok[3] == 0) then
-        return token_create_two(tok[2], tok[1])
+        return token_create_chrcmd(tok[2], tok[1])
 
     -- \typ{tab_tok} for a macro call token
     elseif tok_type == "table" and tok[3] ~= 0 then
         -- There's no official interface to create a macro token
         -- from Lua, so we need to do it manually.
-        return token_create_two(
+        return token_create_chrcmd(
             tok[3] + CS_TOKEN_FLAG - (tok[1] << STRING_OFFSET_BITS),
             tok[1]
         )
@@ -669,9 +688,9 @@ end
 --- @overload fun(self: self, chr: any_tok): user_tok
 function luatools.token:create(chr, cmd)
     if cmd then
-        return token_create_two(chr, cmd)
+        return token_create_chrcmd(chr, cmd)
     else
-        return token_create_one(chr --[[@as any_tok]])
+        return token_create_any(chr --[[@as any_tok]])
     end
 end
 
@@ -722,7 +741,6 @@ end
 --= \subsection{\typ{luatools.token.cmd}}
 --=
 --= Gets the internal “command code”, indexed by the command name.
---- @type table<string, integer> - -
 luatools.token.cmd = table_swapped(token.commands())
 
 
@@ -740,10 +758,6 @@ luatools.token.cached = lt.util:memoized(function(csname)
         return lt.token:create(csname)
     end
 end)
-
---= Pre-define some special tokens
-luatools.token.cached["{"] = lt.token:create(0, lt.token.cmd.left_brace)
-luatools.token.cached["}"] = lt.token:create(0, lt.token.cmd.right_brace)
 
 
 --= \subsection{\typ{luatools.token:set_csname}}
@@ -763,7 +777,9 @@ function luatools.token:set_csname(csname, tok, scope)
     -- We need to define a token with the provided csname first, otherwise we
     -- get an `undefined_cs`-type token, which can't be passed to TeX without
     -- throwing an error.
-    self.token.set_char(csname, 0)
+    if not token_defined(csname) then
+        self.token.set_char(csname, 0)
+    end
 
     -- We can't mix strings and tokens together in a token list, so if we're
     -- given a `csname_tok`, we need to convert it to a `user_tok` first.
@@ -782,6 +798,36 @@ function luatools.token:set_csname(csname, tok, scope)
     end
 
     self.token:run(toks)
+end
+
+
+--= \subsection{Primitive Tokens}
+--=
+--= In order to make sure that \lua{lt.token.cached["PRIMITIVE"]} always works,
+--= we need to pre-cache all of the primitives with their canonical names.
+do
+    local primitives = tex.primitives()
+
+    -- \lua{tex.enableprimitives} always defines the primitives globally, so
+    -- to make sure that we don't interfere with anything else, we'll use an
+    -- impossible-to-type prefix.
+    local prefix = "\xFE\xFE\x7Fluatools\\\x00"
+    tex.enableprimitives(prefix, primitives)
+
+    -- Now we can cache all of the primitives
+    for _, csname in ipairs(primitives) do
+        local primitive = lt.token:create(prefix .. csname)
+        luatools.token.cached[csname] = lt.token:create(
+            primitive.mode, primitive.command
+        )
+    end
+
+    -- And some special non-primitive tokens
+    luatools.token.cached["{"] = lt.token:create(0, lt.token.cmd.left_brace)
+    luatools.token.cached["}"] = lt.token:create(0, lt.token.cmd.right_brace)
+    luatools.token.cached["undefined"] = lt.token:create(
+        0, lt.token.cmd.undefined_cs
+    )
 end
 
 
@@ -911,8 +957,8 @@ end
 -- The typechecker doesn't like the `__index` metamethod, so we need to manually
 -- forward-declare the types of the function methods.
 
---- @class luatools.tex - A table containing \TeX{} functions.
---- @field self luatools  The module root.
+--- @class luatools.tex: _lt_base A table containing \TeX{} functions.
+--- @field self luatools          The module root.
 --- @field mangle_name fun(self:self, params: _name_params): string
 --- @field new_register fun(self:self, params: _name_params): string
 --- @field _get_token fun(self:self, name: string): user_tok, csname_tok
@@ -949,8 +995,7 @@ local texname_to_cmdname = {
     toks  = "assign_toks",
 }
 
-local cmdname_to_texname = table_swapped(texname_to_cmdname) --[[
-    @as table<string, register_type> ]]
+local cmdname_to_texname = table_swapped(texname_to_cmdname)
 
 --= Macros aren't registers, but they still have a csname, so we'll support them
 --= in \lua{luatools.tex} too.
@@ -1315,8 +1360,7 @@ setmetatable(luatools.tex, {
 --= The \typ{luatools.macro} table contains functions for working with \TeX{}
 --= macros (tokens defined by \tex{def}).
 
---- @class luatools.macro - A table containing macro functions.
---- @field self luatools    The module root.
+--- @class luatools.macro: _lt_base A table containing macro functions.
 luatools.macro = {}
 
 
@@ -1504,10 +1548,9 @@ end
 --- @alias node luatex.node
 --- @alias user_whatsit luatex.node.whatsit.user_defined
 
---- @class luatools.node -       A table containing node functions.
---- @field self luatools         The module root.
---- @field [string] fun(...):... A wrapper around the \LuaTeX{} \typ{node}
----                              functions.
+--- @class luatools.node: _lt_base A table containing node functions.
+--- @field [string] fun(...):...   A wrapper around the \LuaTeX{} \typ{node}
+---                                functions.
 luatools.node = setmetatableindex(function(t, k)
 --= LuaMeta\TeX{} removes underscores from most of its \typ{node} functions, so
 --= we'll try removing any underscores if we can't find the function.
