@@ -1433,7 +1433,7 @@ local function split_macro_meaning(toklist)
         -- Convert a macro parameter token in the body back into a "#"
         -- token.
         elseif t[1] == lt.token.cmd.mac_param and t[3] == 0 then
-            table.insert(
+            insert(
                 toklist,
                 i + 1,
                 { lt.token.cmd.mac_param, hash_chrcode, 1 }
@@ -1444,7 +1444,7 @@ local function split_macro_meaning(toklist)
         -- Convert a macro parameter token in the body back into a <digit>
         -- token.
         elseif t[1] == lt.token.cmd.car_ret then
-            table.insert(
+            insert(
                 toklist,
                 i + 1,
                 { lt.token.cmd.other_char, first_digit_chrcode + t[2], 0 }
@@ -1458,7 +1458,7 @@ local function split_macro_meaning(toklist)
             args_count = args_count + 1
             t[1] = lt.token.cmd.mac_param
             t[2] = hash_chrcode
-            table.insert(
+            insert(
                 toklist,
                 i + 1,
                 { lt.token.cmd.other_char, first_digit_chrcode + args_count, 0 }
@@ -1507,15 +1507,41 @@ function luatools.macro:expanded_toks(name)
     self.token:set_csname(saved_protect, self.token:new("protect"))
     self.token:set_csname("protect", self.token.cached["string"])
 
-    -- Prepare the token list
-    local in_toklist = { self.token.cached["{"] }
-    append(in_toklist, select(2, self.macro:to_toklist(name)))
-    insert(in_toklist, self.token.cached["}"])
-
-    -- Expand the macro
+    -- (1) To expand the macro, we first push the macro's csname and a closing
+    -- brace onto the token stack:
+    --     grabbed: nil
+    --     stack  : <\MACRO> <}> <rest of document>
+    --
+    -- (2) Next, we expand and grab the first token from the stack:
+    --     grabbed: <1st \MACRO body>
+    --     stack  : <2nd \MACRO body> <3rd body> <... body> <}> <rest>
+    --
+    -- (3) Then, we push an opening brace and the grabbed first token back onto
+    -- the stack:
+    --     grabbed: nil
+    --     stack  : <{> <1st body> <2nd body> <3rd body> <... body> <}> <rest>
+    --
+    -- (4) Finally, we expand and grab a complete token list:
+    --     grabbed: <1st body> <2nd body> <3rd body> <... body>
+    --     stack  : <rest of document>
+    --
+    -- We need (2) and (3) in case we are given a \tex{protected} macro, which
+    -- wouldn't expand at all in (4) otherwise.
     local out_toklist --- @type tab_toklist
     self.token._run(function()
-        self.token:push(in_toklist)
+        -- (1)
+        self.token:push {
+            self.token:new(name),
+            self.token.cached["}"]
+        }
+        -- (2)
+        local first = self.token.scan_token()
+        -- (3)
+        self.token:push {
+            self.token.cached["{"],
+            first,
+        }
+        -- (4)
         out_toklist = self.token.scan_toks(false, true)
     end)
 
@@ -1573,7 +1599,7 @@ function luatools.macro:super_expanded(name, safe)
         out_node = self.token.scan_list()
     end)
 
-    return self.node:get_chars(out_node)
+    return self.node:to_str(out_node)
 end
 
 
@@ -1734,7 +1760,7 @@ function luatools.node:replace(head, find, replace)
 end
 
 
---= \subsection{\typ{luatools.node:get_chars}}
+--= \subsection{\typ{luatools.node:to_str}}
 --=
 --= Converts the contents of a node list to a string.
 
@@ -1755,7 +1781,7 @@ end)
 
 --- @param  head node The head of the list to convert.
 --- @return string -  The contents of the list as a string.
-function luatools.node:get_chars(head)
+function luatools.node:to_str(head)
     self = self.self
 
     local chars = {}
@@ -1766,7 +1792,7 @@ function luatools.node:get_chars(head)
         elseif self.node:is(n, "glue") then
             insert(chars, " ")
         elseif n.list or n.replace then
-            insert(chars, self.node:get_chars(n.list or n.replace))
+            insert(chars, self.node:to_str(n.list or n.replace))
         end
     end
 
@@ -1825,8 +1851,8 @@ end
 --= Maps a function over a list of nodes.
 
 --- @param  head node                 The head of the list to map over.
---- @param  is   string|boolean       The type of nodes to map over (`true` for
----                                   all).
+--- @param  is   string|boolean       The type of nodes to map over (\lua{true}
+---                                   for all).
 --- @param  func fun(n:node):...:node The function to apply to each node.
 --- @return node head                 The new head of the list.
 function luatools.node:map(head, is, func)
