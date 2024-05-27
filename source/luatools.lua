@@ -630,11 +630,11 @@ end)
 --= \subsection{\typ{luatools.token:_run}}
 --= Runs the given function or token list register inside a new “local \TeX{}
 --= run”.
---- @type fun(func: function<nil, nil>, local: boolean?, grouped: boolean?): nil
+--- @type fun(func: function<nil, nil>): nil
 luatools.token._run = luatex_lmtx(tex.runtoks, tex.runlocal)
 
 
---= \subsection{\typ{luatools.token:create}}
+--= \subsection{\typ{luatools.token:new}}
 --=
 --= Creates a new token.
 
@@ -648,7 +648,7 @@ local token_create_chrcmd = token.new
 --= Creates a token from a \typ{csname_tok}.
 local token_create_csname = token.create
 
---= Creates a token from an \typ{any_tok}.
+--= Creates a \typ{user_tok} from an \typ{any_tok}.
 ---
 --- @param  tok any_tok The token to create.
 --- @return user_tok -  The created token.
@@ -686,7 +686,7 @@ end
 --- @param  cmd integer The command code of the token.
 --- @return user_tok -  The created token.
 --- @overload fun(self: self, chr: any_tok): user_tok
-function luatools.token:create(chr, cmd)
+function luatools.token:new(chr, cmd)
     if cmd then
         return token_create_chrcmd(chr, cmd)
     else
@@ -715,7 +715,7 @@ function luatools.token:push(in_toklist)
     else
         -- Convert \typ{tab_toklist}s into \typ{user_tok[]}s.
         for _, tok in ipairs(in_toklist) do
-            insert(out_toklist, self.token:create(tok))
+            insert(out_toklist, self.token:new(tok))
         end
 
         self.token.put_next(out_toklist)
@@ -734,7 +734,7 @@ function luatools.token:run(code)
 
     self.token._run(function()
         self.token:push(code)
-    end, true)
+    end)
 end
 
 
@@ -755,7 +755,7 @@ local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
 luatools.token.cached = lt.util:memoized(function(csname)
     -- We don't want to cache undefined tokens
     if token_defined(csname) then
-        return lt.token:create(csname)
+        return lt.token:new(csname)
     end
 end)
 
@@ -784,12 +784,12 @@ function luatools.token:set_csname(csname, tok, scope)
     -- We can't mix strings and tokens together in a token list, so if we're
     -- given a `csname_tok`, we need to convert it to a `user_tok` first.
     if type(tok) == "string" then
-        tok = self.token:create(tok)
+        tok = self.token:new(tok)
     end
 
     local toks = {
         self.token.cached["let"],
-        self.token:create(csname),
+        self.token:new(csname),
         tok
     }
 
@@ -809,24 +809,28 @@ do
     local primitives = tex.primitives()
 
     -- \lua{tex.enableprimitives} always defines the primitives globally, so
-    -- to make sure that we don't interfere with anything else, we'll use an
-    -- impossible-to-type prefix.
-    local prefix = "\xFE\xFE\x7Fluatools\\\x00"
+    -- to make sure that we don't interfere with anything else, we'll use a
+    -- private prefix.
+    local prefix = "luatools_primitive_"
     tex.enableprimitives(prefix, primitives)
 
     -- Now we can cache all of the primitives
     for _, csname in ipairs(primitives) do
-        local primitive = lt.token:create(prefix .. csname)
-        luatools.token.cached[csname] = lt.token:create(
+        local primitive = lt.token:new(prefix .. csname)
+        luatools.token.cached[csname] = lt.token:new(
             primitive.mode, primitive.command
         )
     end
 
     -- And some special non-primitive tokens
-    luatools.token.cached["{"] = lt.token:create(0, lt.token.cmd.left_brace)
-    luatools.token.cached["}"] = lt.token:create(0, lt.token.cmd.right_brace)
-    luatools.token.cached["undefined"] = lt.token:create(
-        0, lt.token.cmd.undefined_cs
+    luatools.token.cached["{"] = lt.token:new(
+        utf_code "{", lt.token.cmd.left_brace
+    )
+    luatools.token.cached["}"] = lt.token:new(
+        utf_code "}", lt.token.cmd.right_brace
+    )
+    luatools.token.cached["undefined"] = lt.token:new(
+        utf_code "!", lt.token.cmd.undefined_cs
     )
 end
 
@@ -858,9 +862,9 @@ local user_whatsit_types = {
 --- @return user_tok -          A token representing the fake register.
 local function toklist_to_faketoks(toklist)
     local temp_char = lt.tex:mangle_name {
-        name = "temp_char",
+        name = "toklist_to_faketoks_tmp",
         visibility = "private",
-        type = "toks", -- Close enough...
+        type = "weird",
     }
 
     -- We need to save the token list into the \TeX{} hash table to be able to
@@ -877,8 +881,8 @@ local function toklist_to_faketoks(toklist)
 
     -- Then, we create a “fake” \tex{toks} token that points to the
     -- \tex{chardef} token.
-    return lt.token:create(
-        lt.token:create(temp_char).tok - CS_TOKEN_FLAG,
+    return lt.token:new(
+        lt.token:new(temp_char).tok - CS_TOKEN_FLAG,
         lt.token.cmd.assign_toks
     )
 end
@@ -899,18 +903,18 @@ local function token_to_toks_register(name, fake_tok)
     tex.toks[name] = ""
 
     local fake_tok_name = lt.tex:mangle_name {
-        name = "temp_fake_toks",
+        name = "token_to_toks_register_tmp",
         type = "toks",
         visibility = "private",
     }
-    lt.token:set_csname(fake_tok_name, fake_tok) -- TODO use proper naming
+    lt.token:set_csname(fake_tok_name, fake_tok)
 
     -- Prepend the fake \tex{toks} register onto the empty real one, giving
     -- us a real \tex{toks} register with the correct value.
     lt.token:run {
         lt.token.cached["tokspre"],
-        lt.token:create(name),
-        lt.token:create(fake_tok_name),
+        lt.token:new(name),
+        lt.token:new(fake_tok_name),
     }
 end
 
@@ -935,7 +939,7 @@ function luatools.token:toklist_to_str(toklist)
 
     -- Allocate a new token register
     local name = lt.tex:new_register {
-        name = "temp_real_toks",
+        name = "toklist_to_str_tmp",
         type = "toks",
         visibility = "private",
     }
@@ -943,7 +947,7 @@ function luatools.token:toklist_to_str(toklist)
     -- Store the token list in the register
     self.token:set_toks_register(name, toklist)
 
-    return lt.tex.temp_real_toks --[[@as string]]
+    return lt.tex[name] --[[@as string]]
 end
 
 
@@ -998,8 +1002,9 @@ local texname_to_cmdname = {
 local cmdname_to_texname = table_swapped(texname_to_cmdname)
 
 --= Macros aren't registers, but they still have a csname, so we'll support them
---= in \lua{luatools.tex} too.
---- @alias tex_type register_type|"macro"
+--= in \lua{luatools.tex} too. We'll also define the type \lua{"weird"} for
+--= weird user-defined types.
+--- @alias tex_type register_type|"macro"|"weird" -
 
 --- @class _name_params -       The parameters for the mangled name.
 --- @field name        string   The name to mangle.
@@ -1131,7 +1136,7 @@ function luatools.tex:new_register(params)
     -- Actually create the register
     self.token:run {
         self.token.cached["new" .. params.type],
-        self.token:create(name)
+        self.token:new(name)
     }
 
     -- Cache the name
@@ -1389,7 +1394,7 @@ end
 --- @return tab_toklist -   The \tex{meaning} of the macro.
 local function macro_to_toklist(name)
     -- Get the token for the macro
-    local macro = lt.token:create(name)
+    local macro = lt.token:new(name)
 
     if not macro.cmdname:match("call") then
         lt.msg:error("``" .. name .. "'' is not a macro.")
@@ -1467,13 +1472,14 @@ local function split_macro_meaning(toklist)
 end
 
 
---- @param  name csname_tok The csname of the macro.
---- @return tab_toklist -   The replacement text of the macro.
+--- @param  name csname_tok    The csname of the macro.
+--- @return tab_toklist params The parameters of the macro.
+--- @return tab_toklist body   The replacement text of the macro.
 function luatools.macro:to_toklist(name)
     local meaning = macro_to_toklist(name)
     local params, body = split_macro_meaning(meaning)
 
-    return body
+    return params, body
 end
 
 
@@ -1487,16 +1493,34 @@ end
 function luatools.macro:expanded_toks(name)
     self = self.self
 
+    -- To correctly expand \LaTeX{} \tex{protect}ed macros, we need to redefine
+    -- \tex{protect} before expanding the macro, then restore it afterwards.
+    -- There's no way to save a token's definition from Lua, so we'll need to
+    -- copy it to a new csname.
+    local saved_protect = lt.tex:mangle_name {
+        name = "expanded_toks_tmp",
+        visibility = "private",
+        type = "weird",
+    }
+
+    -- Push the new definition of \tex{protect}
+    self.token:set_csname(saved_protect, self.token:new("protect"))
+    self.token:set_csname("protect", self.token.cached["string"])
+
     -- Prepare the token list
-    local in_toklist = self.macro:to_toklist(name)
-    insert(in_toklist, 1, self.token.cached["{"])
+    local in_toklist = { self.token.cached["{"] }
+    append(in_toklist, select(2, self.macro:to_toklist(name)))
     insert(in_toklist, self.token.cached["}"])
 
+    -- Expand the macro
     local out_toklist --- @type tab_toklist
     self.token._run(function()
         self.token:push(in_toklist)
         out_toklist = self.token.scan_toks(false, true)
-    end, true)
+    end)
+
+    -- Pop the definition of \tex{protect}
+    self.token:set_csname("protect", self.token:new(saved_protect))
 
     return out_toklist
 end
@@ -1524,10 +1548,32 @@ end
 --= Fully-expands a macro by typesetting it in a box and reading the box's
 --= contents.
 
---- @param  name csname_tok The csname of the macro.
---- @return string -        The fully-expanded replacement text.
-function luatools.macro:super_expanded(name)
-    --- @diagnostic disable-next-line TODO
+--- @param  name  csname_tok The csname of the macro.
+--- @param  safe? boolean    Whether to use \tex{hbox} (unsafe) or \tex{hpack}
+---                          (safe). (Default: \lua{false})
+--- @return string -         The fully-expanded replacement text.
+function luatools.macro:super_expanded(name, safe)
+    self = self.self
+
+    local hbox
+    if safe then
+        hbox = self.token.cached["hpack"]
+    else
+        hbox = self.token.cached["hbox"]
+    end
+
+    local out_node --- @type node
+    self.token._run(function()
+        self.token:push {
+            hbox,
+            self.token.cached["{"],
+            self.token:new(name),
+            self.token.cached["}"]
+        }
+        out_node = self.token.scan_list()
+    end)
+
+    return self.node:get_chars(out_node)
 end
 
 
@@ -1692,6 +1738,21 @@ end
 --=
 --= Converts the contents of a node list to a string.
 
+local font_to_unicode = lt.util:memoized(function(font_id)
+    local font = font.getfont(font_id)
+
+    return lt.util:memoized(function(char)
+        local codes = font.characters[char].unicode
+        if type(codes) == "table" then
+            return utf_char(unpack(codes))
+        elseif type(codes) == "number" then
+            return utf_char(codes)
+        else
+            return utf_char(char)
+        end
+    end)
+end)
+
 --- @param  head node The head of the list to convert.
 --- @return string -  The contents of the list as a string.
 function luatools.node:get_chars(head)
@@ -1701,7 +1762,7 @@ function luatools.node:get_chars(head)
 
     for n in self.node.traverse(head) do
         if self.node:is(n, "glyph") then
-            insert(chars, utf_char(n.char))
+            insert(chars, font_to_unicode[n.font][n.char])
         elseif self.node:is(n, "glue") then
             insert(chars, " ")
         elseif n.list or n.replace then
