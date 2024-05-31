@@ -767,12 +767,14 @@ end)
 --= There's surprisingly no way to define a csname with arbitrary tokens from
 --= Lua, so we instead have to use the \tex{let} primitive from \TeX{}.
 
---- @param  csname  string  The name of the csname.
---- @param  tok     any_tok The token to set the csname to.
---- @param  scope   scope   -
---- @return nil     -       -
-function luatools.token:set_csname(csname, tok, scope)
+--- @param  name  name_params  The name of the csname.
+--- @param  tok   any_tok      The token to set the csname to.
+--- @param  scope scope        -
+--- @return nil   -            -
+function luatools.token:set_csname(name, tok, scope)
     self = self.self
+
+    local csname = self.tex:mangle_name(name)
 
     -- We need to define a token with the provided csname first, otherwise we
     -- get an `undefined_cs`-type token, which can't be passed to TeX without
@@ -919,12 +921,15 @@ local function token_to_toks_register(name, fake_tok)
 end
 
 
---- @param  name    csname_tok The name of the register.
+--- @param  name    name_params The name of the register.
 --- @param  toklist tab_toklist The token list to store.
 --- @return nil -          -
 function luatools.token:set_toks_register(name, toklist)
+    self = self.self
+
+    local csname = self.tex:mangle_name(name)
     local fake_tok = toklist_to_faketoks(toklist)
-    token_to_toks_register(name, fake_tok)
+    token_to_toks_register(csname, fake_tok)
 end
 
 
@@ -963,9 +968,9 @@ end
 
 --- @class luatools.tex: _lt_base A table containing \TeX{} functions.
 --- @field self luatools          The module root.
---- @field mangle_name fun(self:self, params: _name_params): string
---- @field new_register fun(self:self, params: _name_params): string
---- @field _get_token fun(self:self, name: string): user_tok, csname_tok
+--- @field mangle_name fun(self:self, params: name_params): string
+--- @field new_register fun(self:self, params: name_params): string
+--- @field _get_token fun(self:self, name: name_params): user_tok, csname_tok
 --- @field [string] ((fun(...):nil))|integer|string|nil -
 ---        Accessor for \TeX{} registers and macros.
 luatools.tex = {}
@@ -1015,10 +1020,19 @@ local cmdname_to_texname = table_swapped(texname_to_cmdname)
 --- @field visibility? "public"|"private" Public or private? (Default:
 ---                                       \lua{"private"})
 
---- @param  params _name_params The parameters for the mangled name.
---- @return string -            The mangled name.
+--- @alias name_params _name_params|string Either mangle a name using the
+---                                        given parameters, or just return the
+---                                        passed string as-is.
+
+--- @param  params name_params The parameters for the mangled name.
+--- @return string -           The mangled name.
 function luatools.tex:mangle_name(params)
     self = self.self
+
+    -- Pass through the name as-is if we're given a string
+    if type(params) == "string" then
+        return params
+    end
 
     -- If we've already defined this name, then just return it from the cache.
     if self._name_cache[params.name] then
@@ -1104,7 +1118,7 @@ end
 --=
 --= Creates a new \TeX{} register with the given parameters.
 
---- @param  params _name_params The parameters for the register.
+--- @param  params name_params The parameters for the register.
 --- @return csname_tok name     The mangled name of the register.
 function luatools.tex:new_register(params)
     self = self.self
@@ -1150,7 +1164,7 @@ end
 --=
 --= Gets the token corresponding to the given name.
 --=
---= To provide a user-friendly interface, we take only variable name, then
+--= To provide a user-friendly interface, we take only the variable name, then
 --= check all possible mangled names for the variable.
 
 --- Helper function for \lua{luatools.tex:_get_token}.
@@ -1167,7 +1181,8 @@ function luatools.tex:_get_token_aux(given, mangled)
     end
 end
 
---- @param  name string         The name of the variable.
+
+--- @param  name name_params    The name of the variable.
 --- @return user_tok?   tok     The token corresponding to the variable.
 --- @return csname_tok? mangled The mangled name of the variable.
 function luatools.tex:_get_token(name)
@@ -1176,6 +1191,21 @@ function luatools.tex:_get_token(name)
     -- Initialization
     local mangled --- @type csname_tok
     local tok --- @type user_tok?
+
+    -- If we're given a table, then mangle the name using those exact
+    -- specifications
+    if type(name) == "table" then
+        local params = name
+        name = params.name
+
+        mangled = self.tex:mangle_name(params)
+        tok = self.tex:_get_token_aux(name, mangled)
+        return tok, mangled
+
+    -- We need this check since otherwise the typechecker gets upset
+    elseif type(name) ~= "string" then
+        return --- @diagnostic disable-line: missing-return-value
+    end
 
     -- Check the cache
     mangled = self._name_cache[name]
@@ -1235,6 +1265,7 @@ function luatools.tex:_get_token(name)
         }
         tok = self.tex:_get_token_aux(name, mangled)
         if tok then return tok, mangled end
+
     end --- @diagnostic disable-line: missing-return
 end
 
@@ -1244,7 +1275,7 @@ end
 --= Gets the value of the given register, or a function that calls the given
 --= macro.
 
---- @param  name string            The name of the register or macro.
+--- @param  name name_params             The name of the register or macro.
 --- @return integer|(fun(...):nil)|nil - The contents of the register or
 ---                                      macro.
 function luatools.tex:_get(name)
@@ -1299,7 +1330,7 @@ end
 
 local dimen_to_sp = tex.sp
 
---- @param  name string                      The name of the register or csname.
+--- @param  name name_params                 The name of the register or csname.
 --- @param  val  any_tok|integer|tab_toklist The value to set the register or
 ---                                          csname to.
 --- @return nil  -               -
@@ -1333,7 +1364,8 @@ function luatools.tex:_set(name, val)
 
     -- Handle setting a \tex{toks} register to a token table
     if register_type == "toks" and val_type == "table" then
-        self.token:set_toks_register(name, val --[[@as tab_toklist]])
+        --- @cast val tab_toklist
+        self.token:set_toks_register(name, val)
         return
     end
 
@@ -1373,12 +1405,14 @@ luatools.macro = {}
 --=
 --= Gets the raw, unexpanded “replacement text” of a macro as a string.
 
---- @param  name csname_tok The csname of the macro.
---- @return string -        The raw replacement text.
+--- @param  name name_params The csname of the macro.
+--- @return string -         The raw replacement text.
 function luatools.macro:unexpanded(name)
     self = self.self
 
-    return self.token.get_macro(name)
+    local csname = self.tex:mangle_name(name)
+
+    return self.token.get_macro(csname)
 end
 
 
@@ -1387,10 +1421,12 @@ end
 --= Gets the expanded “replacement text” of a macro as a token list, like
 --= \tex{expanded} would do.
 
---- @param  name csname_tok The csname of the macro.
---- @return tab_toklist -   The expanded replacement text.
+--- @param  name name_params The csname of the macro.
+--- @return tab_toklist -    The expanded replacement text.
 function luatools.macro:expanded_toks(name)
     self = self.self
+
+    local csname = self.tex:mangle_name(name)
 
     -- To correctly expand \LaTeX{} \tex{protect}ed macros, we need to redefine
     -- \tex{protect} before expanding the macro, then restore it afterwards.
@@ -1430,7 +1466,7 @@ function luatools.macro:expanded_toks(name)
     self.token._run(function()
         -- (1)
         self.token:push {
-            self.token:new(name),
+            self.token:new(csname),
             self.token.cached["}"]
         }
         -- (2)
@@ -1456,12 +1492,13 @@ end
 --= Gets the expanded “replacement text” of a macro as a string, like
 --= \tex{message} would do.
 
---- @param  name csname_tok The csname of the macro.
---- @return string -        The expanded replacement text.
+--- @param  name name_params The csname of the macro.
+--- @return string -         The expanded replacement text.
 function luatools.macro:expanded(name)
     self = self.self
 
-    local toks = self.macro:expanded_toks(name)
+    local csname = self.tex:mangle_name(name)
+    local toks = self.macro:expanded_toks(csname)
     local str = self.token:toklist_to_str(toks)
 
     return str
@@ -1473,12 +1510,14 @@ end
 --= Fully-expands a macro by typesetting it in a box and reading the box's
 --= contents.
 
---- @param  name  csname_tok The csname of the macro.
---- @param  safe? boolean    Whether to use \tex{hbox} (unsafe) or \tex{hpack}
----                          (safe). (Default: \lua{false})
---- @return string -         The fully-expanded replacement text.
+--- @param  name  name_params The csname of the macro.
+--- @param  safe? boolean     Whether to use \tex{hbox} (unsafe) or \tex{hpack}
+---                           (safe). (Default: \lua{false})
+--- @return string -          The fully-expanded replacement text.
 function luatools.macro:super_expanded(name, safe)
     self = self.self
+
+    local csname = self.tex:mangle_name(name)
 
     local hbox
     if safe then
@@ -1492,7 +1531,7 @@ function luatools.macro:super_expanded(name, safe)
         self.token:push {
             hbox,
             self.token.cached["{"],
-            self.token:new(name),
+            self.token:new(csname),
             self.token.cached["}"]
         }
         out_node = self.token.scan_list()
@@ -1538,9 +1577,11 @@ local hash_chrcode        = utf_code "#"
 --= Splits a macro definition token list into its parameters and its
 --= replacement text.
 --- @param  toklist tab_toklist The token list of the macro's \tex{meaning}.
+--- @param  raw?    "raw"       Whether to convert the internal tokens into a
+---                             more user-friendly format.
 --- @return tab_toklist params  The parameters of the macro.
 --- @return tab_toklist body    The replacement text of the macro.
-local function split_macro_meaning(toklist)
+local function split_macro_meaning(toklist, raw)
     local stop_index
     local args_count = 0
 
@@ -1549,6 +1590,13 @@ local function split_macro_meaning(toklist)
         -- "->" inside of \meaning).
         if t[1] == lt.token.cmd.stop then
             stop_index = i
+        end
+
+        -- Don't convert any tokens if we're in raw mode
+        if raw then
+            if stop_index then
+                break
+            end
 
         -- Convert a macro parameter token in the body back into a "#"
         -- token.
@@ -1592,19 +1640,17 @@ local function split_macro_meaning(toklist)
 end
 
 
---- @param  name csname_tok    The csname of the macro.
+--- @param  name name_params   The csname of the macro.
+--- @param  raw? "raw"         Whether to convert the internal tokens into a
+---                            more user-friendly format.
 --- @return tab_toklist params The parameters of the macro.
 --- @return tab_toklist body   The replacement text of the macro.
---- @overload fun(name: csname_tok, raw: "raw"): tab_toklist - Returns the raw
----           meaning of the macro as stored by \TeX{}.
 function luatools.macro:to_toklist(name, raw)
-    local meaning = macro_to_toklist(name)
+    self = self.self
 
-    if raw then
-        return meaning
-    end
-
-    local params, body = split_macro_meaning(meaning)
+    local csname = self.tex:mangle_name(name)
+    local meaning = macro_to_toklist(csname)
+    local params, body = split_macro_meaning(meaning, raw)
 
     return params, body
 end
@@ -1618,11 +1664,12 @@ end
 --= as \lua{{cmd.par_end, chr "#"}} in the parameters and \lua{{cmd.car_ret, n}}
 --= in the replacement text.
 
---- @param  name   csname_tok  The csname of the macro.
---- @param  params tab_toklist The parameters of the macro.
---- @param  body   tab_toklist The replacement text of the macro.
---- @return nil -              -
-function luatools.macro:from_toklist(name, params, body)
+--- @param  name   name_params  The csname of the macro.
+--- @param  params tab_toklist  The parameters of the macro.
+--- @param  body   tab_toklist  The replacement text of the macro.
+--- @param  type?  string       The type of the macro. (Default: \lua{"call"})
+--- @return nil -               -
+function luatools.macro:from_toklist(name, params, body, type)
     self = self.self
 
     -- Merge the parameters and the body
@@ -1637,8 +1684,16 @@ function luatools.macro:from_toklist(name, params, body)
     scratch_user_whatsit.type  = user_whatsit_types.integer
     local macro_ptr = scratch_user_whatsit.value --[[@as integer]]
 
+    -- Get the command code for the macro
+    local cmd --- @type integer
+    if type and self.token.cmd[type] then
+        cmd = self.token.cmd[type]
+    else
+        cmd = self.token.cmd.call
+    end
+
     -- Assign the macro to the csname
-    local macro_tok = token_create_chrcmd(macro_ptr, self.token.cmd.call)
+    local macro_tok = token_create_chrcmd(macro_ptr, cmd)
     self.token:set_csname(name, macro_tok)
 end
 
