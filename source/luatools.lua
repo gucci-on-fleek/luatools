@@ -639,8 +639,8 @@ luatools.token._run = luatex_lmtx(tex.runtoks, tex.runlocal)
 --= Creates a new token.
 
 --= Some special constants used for macro tokens
-STRING_OFFSET_BITS = 21
-CS_TOKEN_FLAG = 0x1FFFFFFF
+local STRING_OFFSET_BITS = 21
+local CS_TOKEN_FLAG = 0x1FFFFFFF
 
 --= Creates a token from a character code and a command code.
 local token_create_chrcmd = token.new
@@ -1382,107 +1382,6 @@ function luatools.macro:unexpanded(name)
 end
 
 
---= \subsection{\typ{luatools.macro:to_toklist}}
---=
---= Gets the raw, unexpanded “replacement text” of a macro as an array of
---= tokens.
-
---= Gets a token list representing the full \tex{meaning} of a macro, with
---= with catcodes and such intact.
----
---- @param  name csname_tok The csname of the macro.
---- @return tab_toklist -   The \tex{meaning} of the macro.
-local function macro_to_toklist(name)
-    -- Get the token for the macro
-    local macro = lt.token:new(name)
-
-    if not macro.cmdname:match("call") then
-        lt.msg:error("``" .. name .. "'' is not a macro.")
-        return --- @diagnostic disable-line: missing-return-value
-    end
-
-    -- We use a \typ{user_defined} whatsit node to convert the macro to a token
-    -- list.
-    scratch_user_whatsit.type  = user_whatsit_types.integer
-    scratch_user_whatsit.value = macro.mode
-    scratch_user_whatsit.type  = user_whatsit_types.toklist
-
-    return scratch_user_whatsit.value --[[@as tab_toklist]]
-end
-
-
--- Character code constants
-local first_digit_chrcode = utf_code "0"
-local hash_chrcode        = utf_code "#"
-
---= Splits a macro definition token list into its parameters and its
---= replacement text.
---- @param  toklist tab_toklist The token list of the macro's \tex{meaning}.
---- @return tab_toklist params  The parameters of the macro.
---- @return tab_toklist body    The replacement text of the macro.
-local function split_macro_meaning(toklist)
-    local stop_index
-    local args_count = 0
-
-    for i, t in ipairs(toklist) do
-        -- Separator between parameters and replacement text (represented by
-        -- "->" inside of \meaning).
-        if t[1] == lt.token.cmd.stop then
-            stop_index = i
-
-        -- Convert a macro parameter token in the body back into a "#"
-        -- token.
-        elseif t[1] == lt.token.cmd.mac_param and t[3] == 0 then
-            insert(
-                toklist,
-                i + 1,
-                { lt.token.cmd.mac_param, hash_chrcode, 1 }
-            )
-        elseif t[1] == lt.token.cmd.mac_param and t[3] == 1 then
-            t[3] = 0
-
-        -- Convert a macro parameter token in the body back into a <digit>
-        -- token.
-        elseif t[1] == lt.token.cmd.car_ret then
-            insert(
-                toklist,
-                i + 1,
-                { lt.token.cmd.other_char, first_digit_chrcode + t[2], 0 }
-            )
-            t[2] = hash_chrcode
-            t[1] = lt.token.cmd.mac_param
-
-        -- Convert a macro parameter token in the parameters back into a
-        -- pair of tokens {"#", <digit>}.
-        elseif t[1] == lt.token.cmd.par_end then
-            args_count = args_count + 1
-            t[1] = lt.token.cmd.mac_param
-            t[2] = hash_chrcode
-            insert(
-                toklist,
-                i + 1,
-                { lt.token.cmd.other_char, first_digit_chrcode + args_count, 0 }
-            )
-        end
-    end
-
-    -- Split the token table
-    return slice(toklist, 2,              stop_index - 1),
-           slice(toklist, stop_index + 1, nil           )
-end
-
-
---- @param  name csname_tok    The csname of the macro.
---- @return tab_toklist params The parameters of the macro.
---- @return tab_toklist body   The replacement text of the macro.
-function luatools.macro:to_toklist(name)
-    local meaning = macro_to_toklist(name)
-    local params, body = split_macro_meaning(meaning)
-
-    return params, body
-end
-
-
 --= \subsection{\typ{luatools.macro:expanded_toks}}
 --=
 --= Gets the expanded “replacement text” of a macro as a token list, like
@@ -1600,6 +1499,147 @@ function luatools.macro:super_expanded(name, safe)
     end)
 
     return self.node:to_str(out_node)
+end
+
+
+--= \subsection{\typ{luatools.macro:to_toklist}}
+--=
+--= Gets the raw, unexpanded “replacement text” of a macro as an array of
+--= tokens.
+
+--= Gets a token list representing the full \tex{meaning} of a macro, with
+--= with catcodes and such intact.
+---
+--- @param  name csname_tok The csname of the macro.
+--- @return tab_toklist -   The \tex{meaning} of the macro.
+local function macro_to_toklist(name)
+    -- Get the token for the macro
+    local macro = lt.token:new(name)
+
+    if not macro.cmdname:match("call") then
+        lt.msg:error("``" .. name .. "'' is not a macro.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    -- We use a \typ{user_defined} whatsit node to convert the macro to a token
+    -- list.
+    scratch_user_whatsit.type  = user_whatsit_types.integer
+    scratch_user_whatsit.value = macro.mode
+    scratch_user_whatsit.type  = user_whatsit_types.toklist
+
+    return scratch_user_whatsit.value --[[@as tab_toklist]]
+end
+
+
+-- Character code constants
+local first_digit_chrcode = utf_code "0"
+local hash_chrcode        = utf_code "#"
+
+--= Splits a macro definition token list into its parameters and its
+--= replacement text.
+--- @param  toklist tab_toklist The token list of the macro's \tex{meaning}.
+--- @return tab_toklist params  The parameters of the macro.
+--- @return tab_toklist body    The replacement text of the macro.
+local function split_macro_meaning(toklist)
+    local stop_index
+    local args_count = 0
+
+    for i, t in ipairs(toklist) do
+        -- Separator between parameters and replacement text (represented by
+        -- "->" inside of \meaning).
+        if t[1] == lt.token.cmd.stop then
+            stop_index = i
+
+        -- Convert a macro parameter token in the body back into a "#"
+        -- token.
+        elseif t[1] == lt.token.cmd.mac_param and t[3] == 0 then
+            insert(
+                toklist,
+                i + 1,
+                { lt.token.cmd.mac_param, hash_chrcode, 1 }
+            )
+        elseif t[1] == lt.token.cmd.mac_param and t[3] == 1 then
+            t[3] = 0
+
+        -- Convert a macro parameter token in the body back into a <digit>
+        -- token.
+        elseif t[1] == lt.token.cmd.car_ret then
+            insert(
+                toklist,
+                i + 1,
+                { lt.token.cmd.other_char, first_digit_chrcode + t[2], 0 }
+            )
+            t[2] = hash_chrcode
+            t[1] = lt.token.cmd.mac_param
+
+        -- Convert a macro parameter token in the parameters back into a
+        -- pair of tokens {"#", <digit>}.
+        elseif t[1] == lt.token.cmd.par_end then
+            args_count = args_count + 1
+            t[1] = lt.token.cmd.mac_param
+            t[2] = hash_chrcode
+            insert(
+                toklist,
+                i + 1,
+                { lt.token.cmd.other_char, first_digit_chrcode + args_count, 0 }
+            )
+        end
+    end
+
+    -- Split the token table
+    return slice(toklist, 2,              stop_index - 1),
+           slice(toklist, stop_index + 1, nil           )
+end
+
+
+--- @param  name csname_tok    The csname of the macro.
+--- @return tab_toklist params The parameters of the macro.
+--- @return tab_toklist body   The replacement text of the macro.
+--- @overload fun(name: csname_tok, raw: "raw"): tab_toklist - Returns the raw
+---           meaning of the macro as stored by \TeX{}.
+function luatools.macro:to_toklist(name, raw)
+    local meaning = macro_to_toklist(name)
+
+    if raw then
+        return meaning
+    end
+
+    local params, body = split_macro_meaning(meaning)
+
+    return params, body
+end
+
+
+--= \subsection{\typ{luatools.macro:from_toklist}}
+--=
+--= Converts a token list into a macro definition. Note that you need to pass
+--= the token list in in \emph{exactly} the form that \TeX{} internally expects
+--= it to be in---this mainly applies to the arguments, which should be entered
+--= as \lua{{cmd.par_end, chr "#"}} in the parameters and \lua{{cmd.car_ret, n}}
+--= in the replacement text.
+
+--- @param  name   csname_tok  The csname of the macro.
+--- @param  params tab_toklist The parameters of the macro.
+--- @param  body   tab_toklist The replacement text of the macro.
+--- @return nil -              -
+function luatools.macro:from_toklist(name, params, body)
+    self = self.self
+
+    -- Merge the parameters and the body
+    local toklist = {}
+    append(toklist, params)
+    insert(toklist, token_create_chrcmd(0, self.token.cmd.stop))
+    append(toklist, body)
+
+    -- Save the token list into \typ{eqtb} and get a pointer to it
+    scratch_user_whatsit.type  = user_whatsit_types.toklist
+    scratch_user_whatsit.value = toklist
+    scratch_user_whatsit.type  = user_whatsit_types.integer
+    local macro_ptr = scratch_user_whatsit.value --[[@as integer]]
+
+    -- Assign the macro to the csname
+    local macro_tok = token_create_chrcmd(macro_ptr, self.token.cmd.call)
+    self.token:set_csname(name, macro_tok)
 end
 
 
