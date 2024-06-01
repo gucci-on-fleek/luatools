@@ -47,6 +47,9 @@ local insert = table.insert
 --= Appends a table to another table, in place.
 local append = table.append
 
+--= Merges two tables, without modifying the originals.
+local merge = table.imerged
+
 --= Concatenates a table into a string.
 local concat = table.concat
 
@@ -61,6 +64,9 @@ local utf_char = utf8.char
 
 --= Gets the codepoint of a character.
 local utf_code = utf8.codepoint
+
+--= Gets the maximum of two values.
+local max = math.max
 
 
 --= \subsection{\typ{luatools}}
@@ -601,7 +607,7 @@ end
 --= The most basic way to represent a token list is as a table of tokens. In
 --= this format, each of the entries can either be a \typ{user_tok} or a
 --= \typ{tab_tok}.
---- @alias tab_toklist (tab_tok | user_tok)[] -
+--- @alias tab_toklist tab_tok[] -
 
 --= The other way to represent a token list is as a string that is tokenized by
 --= TeX in a function-dependent manner. These strings are generally processed
@@ -609,7 +615,7 @@ end
 --= catcodes.
 --- @alias str_toklist string -
 
---- @alias any_toklist tab_toklist|str_toklist - Any type of token list.
+--- @alias any_toklist tab_toklist|str_toklist|user_tok[] - Any type of token list.
 
 
 --= \subsection{\typ{luatools.token}}
@@ -773,7 +779,7 @@ end)
 --- @param  name  name_params  The name of the csname.
 --- @param  tok   any_tok      The token to set the csname to.
 --- @param  scope scope        -
---- @return nil   -            -
+--- @return user_tok -         The created token.
 function luatools.token:set_csname(name, tok, scope)
     self = self.self
 
@@ -803,6 +809,8 @@ function luatools.token:set_csname(name, tok, scope)
     end
 
     self.token:run(toks)
+
+    return self.token:new(csname)
 end
 
 
@@ -959,6 +967,61 @@ function luatools.token:toklist_to_str(toklist)
 end
 
 
+--= \subsection{\typ{luatools.token:to_tab_toklist}}
+--=
+--= Converts \typ{any_toklist}s into \typ{tab_toklist}s.
+
+--- @param  in_toklist any_toklist The token list to convert.
+--- @return tab_toklist -       The converted token list.
+function luatools.token:to_tab_toklist(in_toklist)
+    self = self.self
+
+    if type(in_toklist) == "string" then
+        -- Get the current catcodes
+        local catcode_csname = self.tex:new_register {
+            name = "to_tab_toklist_catcodes",
+            type = "catcodetable",
+        }
+        local catcode_tok = self.token:new(catcode_csname)
+        self.tex.savecatcodetable(catcode_tok)
+
+        -- Tokenize the string and store it in a \tex{toks} register
+        local register_csname = self.tex:new_register {
+            name = "to_tab_toklist_tmp",
+            type = "toks",
+        }
+        tex.scantoks(register_csname, catcode_tok.mode, in_toklist)
+
+        -- Dereference the pointers
+        local outer_ptr = self.token:new(register_csname).mode
+        local inner_ptr = (lt.token:new { 0, 0, outer_ptr }).mode
+
+        -- Extract the tokens
+        scratch_user_whatsit.type  = user_whatsit_types.integer
+        scratch_user_whatsit.value = inner_ptr
+        scratch_user_whatsit.type  = user_whatsit_types.toklist
+        local out_toklist = scratch_user_whatsit.value --[[@as tab_toklist]]
+
+        return slice(out_toklist, 2)
+    else
+        local out_toklist = {}
+        for _, any_tok in ipairs(in_toklist) do
+            if type(any_tok) == "table" then
+                insert(out_toklist, any_tok)
+            else
+                local user_tok = self.token:new(any_tok)
+                insert(out_toklist, {
+                    user_tok.command,
+                    user_tok.mode,
+                    max(user_tok.tok - CS_TOKEN_FLAG, 0)
+                })
+            end
+        end
+
+        return out_toklist
+    end
+end
+
 --=--------------------------------
 --= \section{\TeX{} Interfaces} ---
 --=--------------------------------
@@ -987,24 +1050,26 @@ luatools.tex = {}
 --= “\TeX{}” name.
 
 --= Right now, we'll only support \TeX{} registers with the following types:
---- @alias register_type "dimen"|"count"|"toks" -
+--- @alias register_type "dimen"|"count"|"toks"|"catcodetable" -
 
 --= For consistency, we're using the standard \TeX{} names for the types, so
 --= we'll need to convert them to the expl3 names if we're using expl3.
 --- @type table<register_type, string> - -
 local expl_types = {
-    dimen = "dim",
-    count = "int",
-    toks  = "toks",
+    dimen        = "dim",
+    count        = "int",
+    toks         = "toks",
+    catcodetable = "cctab",
 }
 
 --= \LuaTeX{} gives \tex{REGISTERdef}ed tokens specific command codes which
 --= we'll unfortunately need to hardcode.
 --- @type table<register_type, string> - -
 local texname_to_cmdname = {
-    count = "assign_int",
-    dimen = "assign_dimen",
-    toks  = "assign_toks",
+    count        = "assign_int",
+    dimen        = "assign_dimen",
+    toks         = "assign_toks",
+    catcodetable = "char_given", -- close enough...
 }
 
 local cmdname_to_texname = table_swapped(texname_to_cmdname)
@@ -1121,7 +1186,7 @@ end
 --=
 --= Creates a new \TeX{} register with the given parameters.
 
---- @param  params name_params The parameters for the register.
+--- @param  params name_params  The parameters for the register.
 --- @return csname_tok name     The mangled name of the register.
 function luatools.tex:new_register(params)
     self = self.self
@@ -1278,21 +1343,21 @@ end
 --= Gets the value of the given register, or a function that calls the given
 --= macro.
 
---- @param  name name_params             The name of the register or macro.
---- @return integer|(fun(...):nil)|nil - The contents of the register or
----                                      macro.
+--- @param  name name_params The name of the register or macro.
+--- @return integer|(fun(...):nil)|user_tok? - The contents of the register or
+---                                            macro.
 function luatools.tex:_get(name)
     self = self.self
+    local outer_self = self
 
     local tok = self.tex:_get_token(name)
     if not tok then
         return nil
     end
 
+    -- Macro call
     local cmdname = tok.cmdname
     if cmdname:match("call") then
-        -- Macro
-        local outer_self = self
         return function(...)
             local in_args = {...}
             local out_args = {}
@@ -1319,10 +1384,18 @@ function luatools.tex:_get(name)
         end
     end
 
+    -- Register
     local register_type = cmdname_to_texname[cmdname]
     if register_type then
-        -- Register
         return tex[register_type][tok.index]
+    end
+
+    -- Fallback to running the given token
+    return function(...)
+        outer_self.token:run {
+            tok,
+            ...
+        }
     end
 end
 
@@ -1354,7 +1427,13 @@ function luatools.tex:_set(name, val)
         and val_type == "number") or
        (register_type == "toks" and val_type == "string")
     then
-        tex[register_type][tok.index] = val
+        if tok.index then
+            -- Regular register
+            tex[register_type][tok.index] = val
+        else
+            -- Internal parameter
+            tex[name] = val
+        end
         return
     end
 
@@ -1671,7 +1750,7 @@ end
 --- @param  params tab_toklist  The parameters of the macro.
 --- @param  body   tab_toklist  The replacement text of the macro.
 --- @param  type?  string       The type of the macro. (Default: \lua{"call"})
---- @return nil -               -
+--- @return user_tok macro      The token representing the new macro.
 function luatools.macro:from_toklist(name, params, body, type)
     self = self.self
 
@@ -1697,7 +1776,7 @@ function luatools.macro:from_toklist(name, params, body, type)
 
     -- Assign the macro to the csname
     local macro_tok = token_create_chrcmd(macro_ptr, cmd)
-    self.token:set_csname(name, macro_tok)
+    return self.token:set_csname(name, macro_tok)
 end
 
 
@@ -1728,7 +1807,7 @@ end
 ---                                (Default: \lua{false})
 
 --- @param  params _macro_define The parameters for the new macro.
---- @return nil    -             -
+--- @return user_tok macro       The token representing the new macro.
 function luatools.macro:define(params)
     self = self.self
 
@@ -1749,9 +1828,17 @@ function luatools.macro:define(params)
 
     -- Generate the scanning function
     local scanning_func
-    if not self.fmt.context then
-        --- @type (fun():any)[]
-        local scanners = {}
+    if self.fmt.context then
+        -- \ConTeXt{} handles the scanning for us, so there's nothing to do
+        -- here.
+    elseif #arguments == 0 then
+        -- No arguments, so we can just run the function directly
+        scanning_func = func
+    else
+        -- Before we can run the given function, we need to scan for the
+        -- requested arguments in \TeX{}, then pass them to the function.
+
+        local scanners = {} --- @type (fun(nil):any)[]
         for _, argument in ipairs(arguments) do
             insert(scanners, self.token["scan_" .. argument])
         end
@@ -1792,6 +1879,125 @@ function luatools.macro:define(params)
             actions = func,
             protected = params.protected,
         }
+    end
+
+    return self.token:new(name)
+end
+
+
+--=-----------------------
+--= \section{Verbatim} ---
+--=-----------------------
+--=
+--= The \typ{luatools.verbatim} table contains functions for grabbing
+--= untokenized text from \TeX{}.
+
+--- @class luatools.verbatim: _lt_base A table containing verbatim functions.
+luatools.verbatim = {}
+
+
+--= \subsection{Catcode Tables}
+--=
+--= In order to grab verbatim text, it's best if we can set all possible
+--= catcodes to “other” so that the text is not tokenized. To do this, we'll
+--= need to create a new catcode table.
+--- @type user_tok
+local verbatim_cctab
+do
+    -- Create a new catcode table to use for verbatim text
+    local cctab_csname = lt.tex:new_register {
+        name  = "verbatim_catcodes",
+        type  = "catcodetable",
+        scope = "global",
+    }
+    local cctab_tok = lt.token:new(cctab_csname)
+    local cctab_index = cctab_tok.index --- @cast cctab_index -nil
+
+    -- Initialize the catcode table
+    lt.tex.initcatcodetable(cctab_tok)
+    for chr = 0, 127 do
+        tex.setcatcode(cctab_index, chr, lt.token.cmd.other_char)
+    end
+
+    -- Save the index of the catcode table
+    verbatim_cctab = cctab_tok
+end
+
+--= We also need to restore the original catcodes after we're done grabbing the
+--= verbatim text, so we'll define another catcode table for that.
+--- @type user_tok
+local saved_cctab
+do
+    local saved_cctab_csname = lt.tex:new_register {
+        name  = "saved_catcodes",
+        type  = "catcodetable",
+        scope = "global",
+    }
+    saved_cctab = lt.token:new(saved_cctab_csname) --- @cast saved_cctab -nil
+end
+
+
+--= \subsection{\typ{luatools.verbatim:grab_until}}
+--=
+--= Grabs contents as a verbatim string until the specified tokens are found.
+
+do
+    -- Here, we define a Lua macro that we can place in the body of the
+    -- delimited macro so that we can send the grabbed text back to Lua.
+    local verb_grabber_out --- @type string
+
+    local inner_macro = lt.macro:define {
+        name = "verb_grabber",
+        func = function()
+            -- Grab the verbatim text
+            verb_grabber_out = lt.token.scan_argument(false)
+
+            -- Restore the original catcode table
+            lt.tex.catcodetable = saved_cctab.index
+
+            -- Return to (*)
+            tex.quittoks()
+        end,
+    }
+
+    -- The parameters for the delimited macro
+    local params_tabtoks = { --- @type tab_toklist
+        { lt.token.cmd.par_end, utf_code "#" }, -- Ignore the \endlocalcontrol
+        { lt.token.cmd.par_end, utf_code "#" }, -- The verbatim text
+    }
+
+    -- The body of the delimited macro
+    local body_tabtoks = lt.token:to_tab_toklist {
+            inner_macro,
+            lt.token.cached["{"],
+            token_create_chrcmd(2, lt.token.cmd.car_ret), -- #2
+            lt.token.cached["}"],
+    }
+
+    --- @param  stopper_toks any_toklist The terminating tokens.
+    --- @return string   -   The contents of the environment.
+    function luatools.verbatim:grab_until(stopper_toks)
+        self = self.self
+
+        -- Save the current catcode table and switch to the verbatim one
+        self.tex.savecatcodetable(saved_cctab)
+        self.tex.catcodetable = verbatim_cctab.index
+
+        -- Ensure that \lua{stopper_toks} is in the correct format
+        stopper_toks = self.token:to_tab_toklist(stopper_toks)
+
+        -- Define a new delimitted macro to grab the environment's contents
+        local macro = self.macro:from_toklist(
+            { name = "verb_grabber" },
+            merge(params_tabtoks, stopper_toks),
+            body_tabtoks
+        )
+
+        -- Grab the contents
+        self.token:run { macro } -- (*)
+
+        -- Return the grabbed text
+        return verb_grabber_out
     end
 end
 
