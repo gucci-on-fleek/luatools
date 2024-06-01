@@ -626,6 +626,9 @@ luatools.token = setmetatableindex(function(t, k)
     return v
 end)
 
+--= Add some useful aliases
+luatools.token.scan_integer = luatools.token.scan_int
+
 
 --= \subsection{\typ{luatools.token:_run}}
 --= Runs the given function or token list register inside a new “local \TeX{}
@@ -1701,8 +1704,95 @@ end
 --= \subsection{\typ{luatools.macro:define}}
 --=
 --= Defines a new macro.
-function luatools.macro:define(...)
-    --- @diagnostic disable-next-line TODO
+
+--- @alias _arguments
+--- | "argument"
+--- | "csname"
+--- | "dimen"
+--- | "float"
+--- | "glue"
+--- | "integer"
+--- | "list"
+--- | "string"
+--- | "toks"
+--- | "word"
+
+--- @class _macro_define: _name_params The parameters for defining a new macro.
+--- @field type   nil     (Omit from parent type)
+--- @field func   fun(...):nil The Lua function to run when the macro is called.
+--- @field exact? boolean Whether to use the exact name provided, or to use the
+---                       standard name mangling. (Default: \lua{false})
+--- @field arguments? _arguments[] A list of the arguments that the macro takes.
+---                                (Default: \lua{{}})
+--- @field ["protected"]? boolean  Whether the macro is \tex{protected}.
+---                                (Default: \lua{false})
+
+--- @param  params _macro_define The parameters for the new macro.
+--- @return nil    -             -
+function luatools.macro:define(params)
+    self = self.self
+
+    -- Setup the default parameters
+    local arguments = params.arguments or {}
+    local func      = params.func
+
+    -- Get the mangled name
+    local name
+    if params.exact then
+        name = params.name
+    else
+        local mangle_params = table.copy(params)
+        mangle_params.type = "macro"
+        mangle_params.arguments = string.rep("n", #arguments)
+        name = self.tex:mangle_name(mangle_params)
+    end
+
+    -- Generate the scanning function
+    local scanning_func
+    if not self.fmt.context then
+        --- @type (fun():any)[]
+        local scanners = {}
+        for _, argument in ipairs(arguments) do
+            insert(scanners, self.token["scan_" .. argument])
+        end
+
+        -- An intermediate function that properly “scans” for its arguments
+        -- in the \TeX{} side.
+        scanning_func = function()
+            local values = {}
+            for _, scanner in ipairs(scanners) do
+                insert(values, scanner())
+            end
+
+            func(table.unpack(values))
+        end
+    end
+
+    -- Handle scope and protection
+    local extra_params = {}
+    if params.scope == "global" then
+        insert(extra_params, "global")
+    end
+    if params.protected then
+        insert(extra_params, "protected")
+    end
+
+    -- Define the macro
+    if self.fmt.optex then
+        optex.define_lua_command(name, scanning_func, unpack(extra_params))
+    elseif self.fmt.luatexbase then
+        local index = luatexbase.new_luafunction(name)
+        lua.get_functions_table()[index] = scanning_func
+        self.token.set_lua(name, index, unpack(extra_params))
+    elseif self.fmt.context then
+        interfaces.implement {
+            name = name,
+            public = true,
+            arguments = arguments,
+            actions = func,
+            protected = params.protected,
+        }
+    end
 end
 
 
