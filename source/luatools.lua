@@ -752,6 +752,16 @@ end
 --= Gets the internal “command code”, indexed by the command name.
 luatools.token.cmd = table_swapped(token.commands())
 
+-- We need to add a few extra command codes that aren't in the builtin table
+lt.token.cmd["escape"]        =  lt.token.cmd["relax"]
+lt.token.cmd["out_param"]     =  lt.token.cmd["car_ret"]
+lt.token.cmd["ignore"]        =  lt.token.cmd["endv"]
+lt.token.cmd["active_char"]   =  lt.token.cmd["par_end"]
+lt.token.cmd["match"]         =  lt.token.cmd["par_end"]
+lt.token.cmd["comment"]       =  lt.token.cmd["stop"]
+lt.token.cmd["end_match"]     =  lt.token.cmd["stop"]
+lt.token.cmd["invalid_char"]  =  lt.token.cmd["delim_num"]
+
 
 --= \subsection{\typ{luatools.token.cached}}
 --=
@@ -837,13 +847,13 @@ do
 
     -- And some special non-primitive tokens
     luatools.token.cached["{"] = lt.token:new(
-        utf_code "{", lt.token.cmd.left_brace
+        utf_code "{", lt.token.cmd["left_brace"]
     )
     luatools.token.cached["}"] = lt.token:new(
-        utf_code "}", lt.token.cmd.right_brace
+        utf_code "}", lt.token.cmd["right_brace"]
     )
     luatools.token.cached["undefined"] = lt.token:new(
-        utf_code "!", lt.token.cmd.undefined_cs
+        utf_code "!", lt.token.cmd["undefined_cs"]
     )
 end
 
@@ -896,7 +906,7 @@ local function toklist_to_faketoks(toklist)
     -- \tex{chardef} token.
     return lt.token:new(
         lt.token:new(temp_char).tok - CS_TOKEN_FLAG,
-        lt.token.cmd.assign_toks
+        lt.token.cmd["assign_toks"]
     )
 end
 
@@ -1387,7 +1397,13 @@ function luatools.tex:_get(name)
     -- Register
     local register_type = cmdname_to_texname[cmdname]
     if register_type then
-        return tex[register_type][tok.index]
+        if tok.index then
+            -- Regular register
+            return tex[register_type][tok.index]
+        else
+            -- Internal parameter
+            return tex[name]
+        end
     end
 
     -- Fallback to running the given token
@@ -1670,7 +1686,7 @@ local function split_macro_meaning(toklist, raw)
     for i, t in ipairs(toklist) do
         -- Separator between parameters and replacement text (represented by
         -- "->" inside of \meaning).
-        if t[1] == lt.token.cmd.stop then
+        if t[1] == lt.token.cmd["end_match"] then
             stop_index = i
         end
 
@@ -1682,36 +1698,36 @@ local function split_macro_meaning(toklist, raw)
 
         -- Convert a macro parameter token in the body back into a "#"
         -- token.
-        elseif t[1] == lt.token.cmd.mac_param and t[3] == 0 then
+        elseif t[1] == lt.token.cmd["mac_param"] and t[3] == 0 then
             insert(
                 toklist,
                 i + 1,
-                { lt.token.cmd.mac_param, hash_chrcode, 1 }
+                { lt.token.cmd["mac_param"], hash_chrcode, 1 }
             )
-        elseif t[1] == lt.token.cmd.mac_param and t[3] == 1 then
+        elseif t[1] == lt.token.cmd["mac_param"] and t[3] == 1 then
             t[3] = 0
 
         -- Convert a macro parameter token in the body back into a <digit>
         -- token.
-        elseif t[1] == lt.token.cmd.car_ret then
+        elseif t[1] == lt.token.cmd["out_param"] then
             insert(
                 toklist,
                 i + 1,
-                { lt.token.cmd.other_char, first_digit_chrcode + t[2], 0 }
+                { lt.token.cmd["other_char"], first_digit_chrcode + t[2], 0 }
             )
             t[2] = hash_chrcode
-            t[1] = lt.token.cmd.mac_param
+            t[1] = lt.token.cmd["mac_param"]
 
         -- Convert a macro parameter token in the parameters back into a
         -- pair of tokens {"#", <digit>}.
-        elseif t[1] == lt.token.cmd.par_end then
+        elseif t[1] == lt.token.cmd["match"] then
             args_count = args_count + 1
-            t[1] = lt.token.cmd.mac_param
+            t[1] = lt.token.cmd["mac_param"]
             t[2] = hash_chrcode
             insert(
                 toklist,
                 i + 1,
-                { lt.token.cmd.other_char, first_digit_chrcode + args_count, 0 }
+                { lt.token.cmd["other_char"], first_digit_chrcode + args_count, 0 }
             )
         end
     end
@@ -1757,7 +1773,7 @@ function luatools.macro:from_toklist(name, params, body, type)
     -- Merge the parameters and the body
     local toklist = {}
     append(toklist, params)
-    insert(toklist, token_create_chrcmd(0, self.token.cmd.stop))
+    insert(toklist, token_create_chrcmd(0, self.token.cmd["end_match"]))
     append(toklist, body)
 
     -- Save the token list into \typ{eqtb} and get a pointer to it
@@ -1771,7 +1787,7 @@ function luatools.macro:from_toklist(name, params, body, type)
     if type and self.token.cmd[type] then
         cmd = self.token.cmd[type]
     else
-        cmd = self.token.cmd.call
+        cmd = self.token.cmd["call"]
     end
 
     -- Assign the macro to the csname
@@ -1900,40 +1916,46 @@ luatools.verbatim = {}
 --=
 --= In order to grab verbatim text, it's best if we can set all possible
 --= catcodes to “other” so that the text is not tokenized. To do this, we'll
---= need to create a new catcode table.
---- @type user_tok
-local verbatim_cctab
+--= need to create a new catcode table \typ{verbatim_cctab} where all characters
+--= are set to “other”, and another catcode table \typ{almost_verb_cctab} where
+--= everything except for braces are set to “other”.
+--- @type integer, integer
+local verbatim_cctab, almost_verb_cctab
 do
     -- Create a new catcode table to use for verbatim text
-    local cctab_csname = lt.tex:new_register {
+    local verb_csname = lt.tex:new_register {
         name  = "verbatim_catcodes",
         type  = "catcodetable",
         scope = "global",
     }
-    local cctab_tok = lt.token:new(cctab_csname)
-    local cctab_index = cctab_tok.index --- @cast cctab_index -nil
+    local verb_tok = lt.token:new(verb_csname)
+    local verb_index = verb_tok.index --- @cast verb_index -nil
 
-    -- Initialize the catcode table
-    lt.tex.initcatcodetable(cctab_tok)
-    for chr = 0, 127 do
-        tex.setcatcode(cctab_index, chr, lt.token.cmd.other_char)
-    end
-
-    -- Save the index of the catcode table
-    verbatim_cctab = cctab_tok
-end
-
---= We also need to restore the original catcodes after we're done grabbing the
---= verbatim text, so we'll define another catcode table for that.
---- @type user_tok
-local saved_cctab
-do
-    local saved_cctab_csname = lt.tex:new_register {
-        name  = "saved_catcodes",
+    -- And for almost-verbatim text
+    local almost_csname = lt.tex:new_register {
+        name  = "almost_verbatim_catcodes",
         type  = "catcodetable",
         scope = "global",
     }
-    saved_cctab = lt.token:new(saved_cctab_csname) --- @cast saved_cctab -nil
+    local almost_tok = lt.token:new(almost_csname)
+    local almost_index = almost_tok.index --- @cast almost_index -nil
+
+    -- Initialize the catcode tables
+    lt.tex.initcatcodetable(verb_tok)
+    lt.tex.initcatcodetable(almost_tok)
+
+    for chr = 0, 127 do
+        tex.setcatcode(verb_index,   chr, lt.token.cmd["other_char"])
+        tex.setcatcode(almost_index, chr, lt.token.cmd["other_char"])
+    end
+
+    -- Set the catcodes for the braces
+    tex.setcatcode(almost_index, utf_code "{", lt.token.cmd["left_brace"] )
+    tex.setcatcode(almost_index, utf_code "}", lt.token.cmd["right_brace"])
+
+    -- Save the index of the catcode table
+    verbatim_cctab = verb_index
+    almost_verb_cctab = almost_index
 end
 
 
@@ -1941,36 +1963,103 @@ end
 --=
 --= Grabs contents as a verbatim string until the specified tokens are found.
 
+--= Post-processes the grabbed text.
+--- @param  text        string The grabbed text.
+--- @param  outer_level boolean Whether the text was grabbed at the outer level.
+--- @return string      -       The post-processed text.
+local function verb_postprocess(text, outer_level)
+    -- Replace the \tex{endlinechar} with a newline
+    local endlinechar = utf_char(lt.tex.endlinechar --[[@as integer]])
+    text = text:gsub(endlinechar, "\n")
+
+    -- Remove extra spaces after a macro if the text was already tokenized
+    if not outer_level then
+        -- Sort all possible characters into letters and others. We need to do
+        -- this dynamically each time since the catcodes might have changed.
+        local letters = {}
+        local others  = {}
+
+        for charcode = 0, 255 do
+            local catcode = tex.catcode[charcode]
+            local char    = utf_char(charcode)
+
+            if catcode == lt.token.cmd["letter"] then
+                insert(letters, char)
+            elseif catcode ~= lt.token.cmd["invalid_char"] then
+                insert(others, char)
+            end
+        end
+
+        -- Switch to the LPeg environment to reduce typing.
+        local _ENV = lpeg
+
+        -- Define patterns to match single characters by their catcodes.
+        local any_char    = P(1)
+        local escape_char = P"\\"
+        local letters     = S(concat(letters))
+        local others      = S(concat(others) )
+
+        -- A “control symbol” is the escape character followed by a single
+        -- non-letter character.
+        local control_symbol = escape_char * others
+
+        -- A “control word” is the escape character followed by a sequence of
+        -- letters.
+        local control_word = escape_char * letters^1
+
+        -- A “control sequence” is either a “control word” or a “control
+        -- symbol”.
+        local control_sequence = control_word + control_symbol
+
+        -- \TeX{} adds a single space after control words; we want to remove
+        -- this.
+        local remove_space       = (P " ") / ""
+        local control_word_space = control_word * remove_space
+
+        -- We want to match this pattern anywhere in the text.
+        local anywhere = (control_word_space + any_char)^0
+
+        -- Do the actual replacement
+        text = match(Cs(anywhere), text)
+    end
+
+    return text
+end
+
+
 do
+    -- Save the current catcode table
+    local saved_cctab --- @type integer
+
     -- Here, we define a Lua macro that we can place in the body of the
     -- delimited macro so that we can send the grabbed text back to Lua.
-    local verb_grabber_out --- @type string
+    local verb_grabber_out --- @type string?
 
     local inner_macro = lt.macro:define {
-        name = "verb_grabber",
+        name = "inner_verb_grabber",
         func = function()
             -- Grab the verbatim text
             verb_grabber_out = lt.token.scan_argument(false)
 
             -- Restore the original catcode table
-            lt.tex.catcodetable = saved_cctab.index
+            lt.tex.catcodetable = saved_cctab
 
-            -- Return to (*)
+            -- Return to \lua{luatools.verbatim:grab_until}
             tex.quittoks()
         end,
     }
 
     -- The parameters for the delimited macro
     local params_tabtoks = { --- @type tab_toklist
-        { lt.token.cmd.par_end, utf_code "#" }, -- Ignore the \endlocalcontrol
-        { lt.token.cmd.par_end, utf_code "#" }, -- The verbatim text
+        { lt.token.cmd["match"], utf_code "#" }, -- Ignore the \endlocalcontrol
+        { lt.token.cmd["match"], utf_code "#" }, -- The verbatim text
     }
 
     -- The body of the delimited macro
     local body_tabtoks = lt.token:to_tab_toklist {
             inner_macro,
             lt.token.cached["{"],
-            token_create_chrcmd(2, lt.token.cmd.car_ret), -- #2
+            token_create_chrcmd(2, lt.token.cmd["out_param"]), -- #2
             lt.token.cached["}"],
     }
 
@@ -1979,26 +2068,71 @@ do
     function luatools.verbatim:grab_until(stopper_toks)
         self = self.self
 
-        -- Save the current catcode table and switch to the verbatim one
-        self.tex.savecatcodetable(saved_cctab)
-        self.tex.catcodetable = verbatim_cctab.index
+        -- If we're inside a macro argument, then everything has already been
+        -- tokenized, so how we grab the text depends on where we are.
+        local outer_level = (status.input_ptr == 1)
 
-        -- Ensure that \lua{stopper_toks} is in the correct format
-        stopper_toks = self.token:to_tab_toklist(stopper_toks)
+        if not outer_level then
+            -- Everything is already tokenized, including the stopper tokens,
+            -- so we need to tokenize them using the current catcodes.
+            stopper_toks = self.token:to_tab_toklist(stopper_toks)
+        end
+
+        -- Save the current catcode table and switch to the verbatim one
+        saved_cctab = self.tex.catcodetable --[[@as integer]]
+        self.tex.catcodetable = verbatim_cctab
+
+        if outer_level then
+            -- Nothing has been tokenized yet, so the stopper tokens need to
+            -- have the verbatim catcodes.
+            stopper_toks = self.token:to_tab_toklist(stopper_toks)
+        end
 
         -- Define a new delimitted macro to grab the environment's contents
-        local macro = self.macro:from_toklist(
-            { name = "verb_grabber" },
+        local outer_macro = lt.macro:from_toklist(
+            { name = "outer_verb_grabber" },
             merge(params_tabtoks, stopper_toks),
             body_tabtoks
         )
 
         -- Grab the contents
-        self.token:run { macro } -- (*)
+        verb_grabber_out = nil
+        self.token:run { outer_macro } -- Runs the macro \tex{verb_grabber}
 
-        -- Return the grabbed text
-        return verb_grabber_out
+        if not verb_grabber_out then
+            lt.msg:error("Failed to grab verbatim text.")
+            return --- @diagnostic disable-line: missing-return-value
+        end
+
+        -- Post-process the grabbed text
+        return verb_postprocess(verb_grabber_out, outer_level)
     end
+end
+
+
+--= \subsection{\typ{luatools.verbatim:grab_braced}}
+--=
+--= Grabs the contents of a braced group as a verbatim string.
+
+--- @return string - The contents of the braced group.
+function luatools.verbatim:grab_braced()
+    self = self.self
+
+    -- Get the current level
+    local outer_level = (status.input_ptr == 1)
+
+    -- Save the current catcode table and switch to the verbatim one
+    local saved_cctab = self.tex.catcodetable --[[@as integer]]
+    self.tex.catcodetable = almost_verb_cctab
+
+    -- Grab the contents of the braced group
+    local text = self.token.scan_argument(false)
+
+    -- Restore the original catcode table
+    lt.tex.catcodetable = saved_cctab
+
+    -- Post-process the grabbed text
+    return verb_postprocess(text, outer_level)
 end
 
 
