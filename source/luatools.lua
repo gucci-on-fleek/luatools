@@ -285,47 +285,13 @@ function luatools.init(config)
 end
 
 
---= Initialize ourself.
---=
---= We need to use \typ{setmetatableindex} here because \typ{luatools.init}
---= creates a copy of the \typ{luatools} table, but we're still adding new
---= functions to it after this.
---- @type luatools - -
-lt = setmetatableindex(
-    luatools.init {
-        name        = "luatools",
-        ns          = "lt",
-        version     = "0.0.0", --%%version
-        date        = "2021-07-01", --%%dashdate
-        description = "Cross-format Lua helpers."
-    },
-    function(lt, k)
-        local submodule = luatools[k]
-        local submodule_indexer = (getmetatable(submodule) or {}).__index
-
-        local v = setmetatableindex(
-            submodule,
-            function(tt, kk)
-                if kk == "self" then
-                    return lt
-                elseif submodule_indexer then
-                    return submodule_indexer(tt, kk)
-                end
-            end
-        )
-        lt[k] = v
-        return v
-    end
-)
-
-
 --- Ternary operator for LuaTeX and LuaMetaTeX.
 --- @generic        T - -
 --- @param   luatex T Value if running in \LuaTeX{}.
 --- @param   lmtx   T Value if running in LuaMeta\TeX{}.
 --- @return  T    out -
 local function luatex_lmtx(luatex, lmtx)
-    if lt.fmt.lmtx then
+    if luatools.fmt.lmtx then
         return lmtx
     else
         return luatex
@@ -422,7 +388,7 @@ function luatools.msg:info(msg)
         -- provide any log-only reporters, so we need this hack.
         local info = logs.reporter(self.config.name, "info")
 
-        function luatools.msg:info(msg)
+        function self.msg:info(msg)
             logs.pushtarget("logfile")
             info(msg)
             logs.poptarget()
@@ -431,14 +397,14 @@ function luatools.msg:info(msg)
         -- For Plain and LaTeX, we can use the built-in info reporter.
         local name = self.config.name
 
-        function luatools.msg:info(msg)
+        function self.msg:info(msg)
             luatexbase.module_info(name, msg)
         end
     else
         -- OpTeX doesn't have a special info reporter, so we need to do it
         -- manually.
         local start = self.config.name .. " Info: "
-        function luatools.msg:info(msg)
+        function self.msg:info(msg)
             self = self.self
 
             self.msg:log(start .. msg)
@@ -511,6 +477,42 @@ function luatools.msg:error(msg)
 
     self.msg:error(msg)
 end
+
+
+--= Initialize ourself.
+--=
+--= We need to use \typ{setmetatableindex} here because \typ{luatools.init}
+--= creates a copy of the \typ{luatools} table, but we're still adding new
+--= functions to it after this. And we need to wait until after we've defined
+--= the \typ{msg} submodule so that we can use it to print any messages that
+--= we encounter during initialization.
+--- @type luatools - -
+lt = setmetatableindex(
+    luatools.init {
+        name        = "luatools",
+        ns          = "lt",
+        version     = "0.0.0", --%%version
+        date        = "2021-07-01", --%%dashdate
+        description = "Cross-format Lua helpers."
+    },
+    function(lt, k)
+        local submodule = luatools[k]
+        local submodule_indexer = (getmetatable(submodule) or {}).__index
+
+        local v = setmetatableindex(
+            submodule,
+            function(tt, kk)
+                if kk == "self" then
+                    return lt
+                elseif submodule_indexer then
+                    return submodule_indexer(tt, kk)
+                end
+            end
+        )
+        lt[k] = v
+        return v
+    end
+)
 
 
 --=------------------------
@@ -1069,6 +1071,7 @@ luatools.tex = {}
 --- | "count"
 --- | "dimen"
 --- | "toks"
+--- | "whatsit"
 
 --= For consistency, we're using the standard \TeX{} names for the types, so
 --= we'll need to convert them to the expl3 names if we're using expl3.
@@ -1079,6 +1082,7 @@ local expl_types = {
     count        = "int",
     dimen        = "dim",
     toks         = "toks",
+    whatsit      = "whatsit",
 }
 
 --= \LuaTeX{} gives \tex{REGISTERdef}ed tokens specific command codes which
@@ -1090,6 +1094,7 @@ local texname_to_cmdname = {
     count        = "assign_int",
     dimen        = "assign_dimen",
     toks         = "assign_toks",
+    whatsit      = "char_given",
 }
 
 local cmdname_to_texname = table_swapped(texname_to_cmdname)
@@ -1235,11 +1240,30 @@ function luatools.tex:new_register(params)
         self.token.set_char(name, 0)
     end
 
-    -- Actually create the register
-    self.token:run {
-        self.token.cached["new" .. params.type],
-        self.token:new(name)
-    }
+    if params.type == "whatsit" then
+        -- Whatsits aren't registers at all, but we still need an allocator for
+        -- them.
+        local value  --- @type integer
+        if self.fmt.luatexbase then
+            value = luatexbase.new_whatsit(name)
+        elseif self.fmt.context then
+            value = nodes.pool.userids[name]
+        elseif self.fmt.optex then
+            -- OpTeX doesn't have an allocator for whatsits, so we'll use a
+            -- SHA-2 hash of the name instead.
+            local low, high = sha2.digest256(name):byte(1, 2)
+            value = high * 256 + low
+        end
+
+        -- Make a \tex{chardef} token so that we can treat it like a register
+        self.token.set_char(name, value)
+    else
+        -- We've got a “real” register, so let's define it.
+        self.token:run {
+            self.token.cached["new" .. params.type],
+            self.token:new(name)
+        }
+    end
 
     -- Cache the name
     self._name_cache[params.name] = name
