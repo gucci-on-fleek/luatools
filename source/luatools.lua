@@ -211,7 +211,8 @@ local lt
 --=     }
 --= \stopcode
 
---- @class luatools.config: _lt_base A table containing module-local data.
+--- @class (exact) luatools.config: _lt_base A table containing module-local
+---                                          data.
 --- @field name         string  The name of the module.
 --- @field ns?          string  The namespace of the module.
 --- @field version?     string  The version of the module.
@@ -994,19 +995,14 @@ function luatools.token:to_tab_toklist(in_toklist)
 
     if type(in_toklist) == "string" then
         -- Get the current catcodes
-        local catcode_csname = self.tex:new_register {
-            name = "to_tab_toklist_catcodes",
-            type = "catcodetable",
-        }
-        local catcode_tok = self.token:new(catcode_csname)
-        self.tex.savecatcodetable(catcode_tok)
+        local current_cctab = self.tex.catcodetable --[[@as integer]]
 
         -- Tokenize the string and store it in a \tex{toks} register
         local register_csname = self.tex:new_register {
             name = "to_tab_toklist_tmp",
             type = "toks",
         }
-        tex.scantoks(register_csname, catcode_tok.mode, in_toklist)
+        tex.scantoks(register_csname, current_cctab, in_toklist)
 
         -- Dereference the pointers
         local outer_ptr = self.token:new(register_csname).mode
@@ -1038,6 +1034,7 @@ function luatools.token:to_tab_toklist(in_toklist)
     end
 end
 
+
 --=--------------------------------
 --= \section{\TeX{} Interfaces} ---
 --=--------------------------------
@@ -1066,26 +1063,33 @@ luatools.tex = {}
 --= “\TeX{}” name.
 
 --= Right now, we'll only support \TeX{} registers with the following types:
---- @alias register_type "dimen"|"count"|"toks"|"catcodetable" -
+--- @alias register_type
+--- | "attribute"
+--- | "catcodetable"
+--- | "count"
+--- | "dimen"
+--- | "toks"
 
 --= For consistency, we're using the standard \TeX{} names for the types, so
 --= we'll need to convert them to the expl3 names if we're using expl3.
 --- @type table<register_type, string> - -
 local expl_types = {
-    dimen        = "dim",
-    count        = "int",
-    toks         = "toks",
+    attribute    = "attr",
     catcodetable = "cctab",
+    count        = "int",
+    dimen        = "dim",
+    toks         = "toks",
 }
 
 --= \LuaTeX{} gives \tex{REGISTERdef}ed tokens specific command codes which
 --= we'll unfortunately need to hardcode.
 --- @type table<register_type, string> - -
 local texname_to_cmdname = {
+    attribute    = "assign_attr",
+    catcodetable = "char_given", -- close enough...
     count        = "assign_int",
     dimen        = "assign_dimen",
     toks         = "assign_toks",
-    catcodetable = "char_given", -- close enough...
 }
 
 local cmdname_to_texname = table_swapped(texname_to_cmdname)
@@ -1095,7 +1099,7 @@ local cmdname_to_texname = table_swapped(texname_to_cmdname)
 --= weird user-defined types.
 --- @alias tex_type register_type|"macro"|"weird" -
 
---- @class _name_params -       The parameters for the mangled name.
+--- @class (exact) _name_params The parameters for the mangled name.
 --- @field name        string   The name to mangle.
 --- @field type?       tex_type The \TeX{} type that the name points at.
 --- @field arguments?  string   An expl3 macro “signature” (the characters after
@@ -1820,7 +1824,8 @@ end
 --- | "toks"
 --- | "word"
 
---- @class _macro_define: _name_params The parameters for defining a new macro.
+--- @class (exact) _macro_define: _name_params The parameters for defining a
+---                                            new macro.
 --- @field type   nil     (Omit from parent type)
 --- @field func   fun(...):nil The Lua function to run when the macro is called.
 --- @field exact? boolean Whether to use the exact name provided, or to use the
@@ -2128,10 +2133,10 @@ do
 
     -- The body of the delimited macro
     local body_tabtoks = lt.token:to_tab_toklist {
-            inner_macro,
-            lt.token.cached["{"],
-            token_create_chrcmd(2, lt.token.cmd["out_param"]), -- #2
-            lt.token.cached["}"],
+        inner_macro,
+        lt.token.cached["{"],
+        token_create_chrcmd(2, lt.token.cmd["out_param"]), -- #2
+        lt.token.cached["}"],
     }
 
 
@@ -2248,8 +2253,10 @@ end
 
 --- @alias node luatex.node
 --- @alias user_whatsit luatex.node.whatsit.user_defined
+--- @alias list_node luatex.node.list
 
 --- @class luatools.node: _lt_base A table containing node functions.
+--- @field self     luatools       The module root.
 --- @field [string] fun(...):...   A wrapper around the \LuaTeX{} \typ{node}
 ---                                functions.
 luatools.node = setmetatableindex(function(t, k)
@@ -2309,15 +2316,107 @@ end
 --=
 --= Checks if a node is the specified type or subtype.
 
---- @param  n     node   The node to check.
---- @param  query string The type or subtype to check against.
---- @return boolean -    Whether the node is of the specified type or subtype.
-function luatools.node:is(n, query)
+--- @param  node        node   The node to check.
+--- @param  wanted_type string The type or subtype to check against.
+--- @return boolean     -      Whether the node is of the specified type or
+---                            subtype.
+function luatools.node:is(node, wanted_type)
     self = self.self
 
-    local type, subtype = self.node:type(n)
+    local given_type, given_subtype = self.node:type(node)
 
-    return query == type or query == subtype
+    return (wanted_type == given_type) or (wanted_type == given_subtype)
+end
+
+
+--= \subsection{\typ{luatools.node:has}}
+--=
+--= Checks if a node has the specified field.
+
+--- @param  node  node   The node to check.
+--- @param  field string The field to check for.
+--- @return boolean -    Whether the node has the specified field.
+function luatools.node:has(node, field)
+    return node[field] ~= nil
+end
+
+
+--= \subsection{\typ{luatools.node:attr}}
+--=
+--= Gets the value of an attribute on a node.
+
+--- @param  node    node           The node to get the attribute from.
+--- @param  attr    string|integer The attribute to get.
+--- @return integer -              The value of the attribute.
+function luatools.node:attr(node, attr)
+    self = self.self
+
+    if type(attr) == "string" then
+        local tok = self.tex:_get_token(attr)
+        attr = tok.index
+    end
+
+    return self.node.get_attribute(node, attr)
+end
+
+
+--= \subsection{\typ{luatools.node:query}}
+--=
+--= Checks to see if a node matches the given query. Queries of the same type
+--= are treated as an OR, while queries of different types are treated as an
+--= AND.
+
+--- @class (exact) _node_query   The query to check for.
+--- @field node  node            The node to check.
+--- @field is?   string|string[] The types of the node to check for.
+--- @field has?  string|string[] The fields of the node to check for.
+--- @field attr? string|string[] The attributes of the node to check for.
+
+--= Makes sure that the query is in table form.
+--- @param  query?   string|string[] The current query
+--- @return string[] -               The fixed query
+local function query_to_table(query)
+    if type(query) == "nil" then
+        return {}
+    elseif type(query) == "string" then
+        return { query }
+    else
+        return query
+    end
+end
+
+
+--- @param  criteria _node_query The query to check for.
+--- @return boolean  -           Whether the node matches the query.
+function luatools.node:query(criteria)
+    self = self.self
+
+    local node = criteria.node
+
+    -- Make sure that every entry of the table is a table
+    criteria.is   = query_to_table(criteria.is  )
+    criteria.has  = query_to_table(criteria.has )
+    criteria.attr = query_to_table(criteria.attr)
+
+    -- Loop over every query type in the \typ{query} table
+    for _, query_name in pairs { "is", "has", "attr" } do
+        local result       = true -- Empty queries are always true
+        local query_values = criteria[query_name]
+
+        -- Check to see if any of the queries return true
+        for _, query_value in pairs(query_values) do
+            result = self.node[query_name](self.node, node, query_value)
+            if result then
+                break
+            end
+        end
+
+        if not result then
+            return false
+        end
+    end
+
+    return true
 end
 
 
@@ -2325,10 +2424,10 @@ end
 --=
 --= Creates a new node with the specified parameters.
 
---- @class _node_new -     The node creation parameters.
---- @field type     string The type of the new node.
---- @field subtype? string The subtype of the new node.
---- @field [string] any    Any additional fields to set on the new node.
+--- @class (exact) _node_new The node creation parameters.
+--- @field type     string   The type of the new node.
+--- @field subtype? string   The subtype of the new node.
+--- @field [string] any      Any additional fields to set on the new node.
 
 --- @param  params _node_new The parameters for the new node.
 --- @return node   -         The new node.
@@ -2344,6 +2443,51 @@ function luatools.node:new(params)
     end
 
     return n
+end
+
+
+--= \subsection{\typ{luatools.node:free_recursive}}
+--=
+--= Frees a node and all of its children.
+
+local _free_recursive = luatex_lmtx(node.flush_node, node.flushnode)
+
+--- @param  node node The node to free.
+--- @return nil  -    -
+function luatools.node:free_recursive(node)
+    _free_recursive(node)
+end
+
+
+--= \subsection{\typ{luatools.node:free_following}}
+--=
+--= Frees a node and all of the nodes that follow it.
+
+local _free_following = luatex_lmtx(node.flush_list, node.flushlist)
+
+--- @param  head node The head of the node list to free.
+--- @return nil  -    -
+function luatools.node:free_following(head)
+    _free_following(head)
+end
+
+
+--= \subsection{\typ{luatools.node:free_only}}
+--=
+--= Frees a node, but not its children.
+
+--- @param  node  list_node The node to free.
+--- @return node list       The head of the freed node's list.
+--- @overload fun(node: node): nil
+function luatools.node:free_only(node)
+    local list = node.list
+    if list then
+        node.list = nil
+    end
+
+    _free_recursive(node)
+
+    return list
 end
 
 
@@ -2384,6 +2528,9 @@ function luatools.node:replace(head, find, replace)
 
     -- Insert `replace` in its place
     head, replace = self.node.insert_before(head, current, replace)
+
+    -- Free `find`
+    self.node:free_recursive(find)
 
     return head
 end
@@ -2429,34 +2576,82 @@ function luatools.node:to_str(head)
 end
 
 
+--= \subsection{\typ{luatools.node:from_str}}
+--=
+--= Converts a string into a node list.
+
+--- @param  text     string               The string to convert.
+--- @param  catcodes "verbatim"|"current" Whether to convert the characters
+---                                       literally or to parse them using the
+---                                       current \TeX{} catcodes.
+--- @return node     head                 The head of the new node list.
+function luatools.node:from_str(text, catcodes)
+    self = self.self
+
+    -- Choose the appropriate catcode table and box command
+    local cctab, hbox  --- @type integer, user_tok
+    if catcodes == "verbatim" then
+        hbox  = self.token.cached["hpack"]
+        cctab = verbatim_cctab
+    elseif catcodes == "current" then
+        hbox  = self.token.cached["hbox"]
+        cctab = self.tex.catcodetable --[[@as integer]]
+    else
+        lt.msg:error("Invalid catcodes: " .. catcodes)
+    end
+
+    -- Move the string into a token register
+    local register_csname = self.tex:new_register {
+        name = "node_from_str_tmp",
+        type = "toks",
+    }
+    tex.scantoks(register_csname, cctab, text)
+
+    -- Push the tokens into \TeX{} and grab the resulting box
+    local out_node --- @type list_node
+    self.token._run(function()
+        self.token:push {
+            hbox,
+            self.token.cached["{"],
+            self.token.cached["the"],
+            self.token.cached[register_csname],
+            self.token.cached["}"],
+        }
+        out_node = self.token.scan_list()
+    end)
+
+    -- Return the inner list
+    return self.node:free_only(out_node)
+end
+
+
 --= \subsection{\typ{luatools.node:get_next}}
 --=
 --= Gets the next node in a list that matches the specified criteria.
 
---- @class _node_get_next -                The criteria to search for.
---- @field is string                       The type of the node to search for.
---- @field direction? "forward"|"backward" The direction to search in.
+--- @class (exact) _node_get_next: _node_query The criteria to search for.
+--- @field direction? "forward"|"backward"     The direction to search in.
 
---- @param  head  node              The head of the list to search.
 --- @param  criteria _node_get_next The criteria to search for.
 --- @return node? -                 The first node that matches the criteria.
-function luatools.node:get_next(head, criteria)
+function luatools.node:get_next(criteria)
     self = self.self
 
-    local is = criteria.is
+    local head      = criteria.node
     local direction = criteria.direction or "forward"
 
     if direction == "forward" then
         -- Use the standard traverser, but stop at the first match
         for n in self.node.traverse(head) do
-            if self.node:is(n, is) then
+            criteria.node = n
+            if self.node:query(criteria) then
                 return n
             end
         end
     elseif direction == "backward" and self.fmt.lmtx then
         -- LuaMetaTeX has a builtin reverse traversal function
         for n in self.node.traverse(head, true) do
-            if self.node:is(n, is) then
+            if self.node:query(criteria) then
                 return n
             end
         end
@@ -2464,7 +2659,7 @@ function luatools.node:get_next(head, criteria)
         -- For LuaTeX, we need to manually traverse the list in reverse
         local n = head
         while n do
-            if self.node:is(n, is) then
+            if self.node:query(criteria) then
                 return n
             end
             n = n.prev
@@ -2479,32 +2674,84 @@ end
 --=
 --= Maps a function over a list of nodes.
 
---- @param  head node                 The head of the list to map over.
---- @param  is   string|boolean       The type of nodes to map over (\lua{true}
----                                   for all).
---- @param  func fun(n:node):...:node The function to apply to each node.
---- @return node head                 The new head of the list.
-function luatools.node:map(head, is, func)
+--- @class (exact) _node_map: _node_query The parameters for mapping over a
+---                                       list of nodes.
+--- @field func (fun(n:node):...:node)|(fun(n:node):boolean?)
+---             The function to apply to each node.
+
+--- @param  params _node_map The parameters for mapping over the list.
+--- @return node   head      The new head for the list.
+function luatools.node:map(params)
     self = self.self
+
+    local head = params.node
 
     -- Save all the nodes in a table so that the mapping function can safely
     -- modify the `next` pointers without breaking the traversal.
-    local given_nodes = {}
+    local given_nodes = {} --- @type node[]
     for n in self.node.traverse(head) do
         insert(given_nodes, n)
     end
 
     -- Apply the function to each node
-    local out_nodes = {}
+    local out_nodes = {} --- @type node[]
     for _, n in ipairs(given_nodes) do
-        if is == true or self.node:is(n, is) then
-            append(out_nodes, { func(n) })
+        params.node = n
+        if self.node:query(params) then
+            local out = { params.func(n) }
+            local first = out[1]
+            if first == nil or first == true then
+                -- If the function returns \lua{nil} or \lua{true}, then we
+                -- add the node to the list as-is.
+                insert(out_nodes, n)
+            elseif first == false then
+                -- If the function returns \lua{false}, then we skip the node.
+            else
+                -- Otherwise, we add the returned nodes to the list.
+                append(out_nodes, out)
+            end
         else
             insert(out_nodes, n)
         end
     end
 
     return self.node:join(out_nodes)
+end
+
+
+--= \subsection{\typ{luatools.node:map_recurse}}
+--=
+--= Maps a function over a list of nodes and through all of their nested lists.
+
+--- @param  params _node_map The parameters for mapping over the list.
+--- @return node   head      The new head for the list.
+function luatools.node:map_recurse(params)
+    self = self.self
+
+    local head = params.node
+    local func = params.func
+
+    head = self.node:map {
+        node = head,
+        func = function(n)
+            local out = n  --- @type node|boolean?
+
+            params.node = n
+            if self.node:query(params) then
+                out = func(n)
+            end
+
+            if n.list then
+                --- @cast n list_node
+                params.node = n.list
+                n.list = self.node:map_recurse(params)
+            end
+
+            return out
+        end
+    }
+
+    return head
 end
 
 
