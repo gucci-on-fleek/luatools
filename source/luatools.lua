@@ -68,6 +68,15 @@ local utf_code = utf8.codepoint
 --= Gets the maximum of two values.
 local max = math.max
 
+--= Escapes a string for use in a Lua pattern.
+--- @param  str string The string to escape.
+--- @return string -   The escaped string.
+local function escape_pattern(str)
+    str = str:escapedpattern()
+    str = str:gsub("([$^])", "%%%1")
+    return str
+end
+
 
 --= \subsection{\typ{luatools}}
 --=
@@ -286,10 +295,10 @@ end
 
 
 --- Ternary operator for LuaTeX and LuaMetaTeX.
---- @generic        T - -
---- @param   luatex T Value if running in \LuaTeX{}.
---- @param   lmtx   T Value if running in LuaMeta\TeX{}.
---- @return  T    out -
+--- @generic        T   - -
+--- @param   luatex T   Value if running in \LuaTeX{}.
+--- @param   lmtx   any Value if running in LuaMeta\TeX{}.
+--- @return  T      out -
 local function luatex_lmtx(luatex, lmtx)
     if luatools.fmt.lmtx then
         return lmtx
@@ -313,7 +322,7 @@ luatools.msg = {}
 --=
 --= Prints a message to only the console.
 
-local write_nl = texio.write_nl or texio.writenl
+local write_nl = luatex_lmtx(texio.write_nl, texio.writenl)
 local CONSOLE = luatex_lmtx("term", "terminal")
 
 --- @param  ... string The messages to print.
@@ -567,6 +576,34 @@ end
 --- @alias scope "local"|"global"|nil -
 
 
+--= \subsection{\typ{string:find_all}}
+--=
+--= Finds all occurrences of a pattern in a string.
+
+--- @param  str         string  The string to search in.
+--- @param  pattern     string  The pattern to search for.
+--- @param  init?       integer The starting position.
+--- @param  plain?      boolean Whether to disable patterns.
+--- @return integer[][] matches The positions of the matches.
+function string.find_all(str, pattern, init, plain)
+    local matches = {}
+    local start, stop = init, nil
+
+    while true do
+        start, stop = str:find(pattern, start, plain)
+
+        if start then
+            insert(matches, { start, stop })
+            start = stop + 1
+        else
+            break
+        end
+    end
+
+    return matches
+end
+
+
 --=---------------------------------
 --= \section{Tokens (Low-Level)} ---
 --=---------------------------------
@@ -608,9 +645,12 @@ end
 --= represent these.
 
 --= The most basic way to represent a token list is as a table of tokens. In
---= this format, each of the entries can either be a \typ{user_tok} or a
---= \typ{tab_tok}.
+--= this format, each of the entries are \typ{tab_tok}s.
 --- @alias tab_toklist tab_tok[] -
+
+--= Most of the \LuaTeX{} functions that take \typ{tab_toklist}s also accept
+--= entires that are \typ{user_tok}s.
+--- @alias tabuser_toklist (tab_tok|user_tok)[] -
 
 --= The other way to represent a token list is as a string that is tokenized by
 --= TeX in a function-dependent manner. These strings are generally processed
@@ -624,9 +664,8 @@ end
 --= \subsection{\typ{luatools.token}}
 --=
 --= We define a table \typ{luatools.token} to hold all of our token functions.
---- @class luatools.token: _lt_base    A table containing token functions.
---- @field [string] function<any, any> A wrapper around the \LuaTeX{}
----                                    \typ{token} functions.
+--- @class luatools.token: luatex.tokenlib A table containing token functions.
+--- @field self            luatools        The module root.
 luatools.token = setmetatableindex(function(t, k)
 --= LuaMeta\TeX{} removes underscores from most of its \typ{token} functions, so
 --= we'll try removing any underscores if we can't find the function.
@@ -642,7 +681,6 @@ luatools.token.scan_integer = luatools.token.scan_int
 --= \subsection{\typ{luatools.token:_run}}
 --= Runs the given function or token list register inside a new “local \TeX{}
 --= run”.
---- @type fun(func: function<nil, nil>): nil
 luatools.token._run = luatex_lmtx(tex.runtoks, tex.runlocal)
 
 
@@ -772,7 +810,7 @@ lt.token.cmd["max_char_code"] = lt.token.cmd["delim_num"]
 --=
 --= Gets a \TeX{} token by name and caches it for later.
 
---- @type fun(name: csname_tok): boolean
+--- @diagnostic disable-next-line: undefined-field
 local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
 
 --- @type table<string, user_tok?> - -
@@ -890,8 +928,8 @@ local user_whatsit_types = {
 --= Stores a \typ{tab_toklist} in a “fake” \tex{toks} register (without giving
 --= it a name).
 ---
---- @param  toklist tab_toklist The token list to store.
---- @return user_tok -          A token representing the fake register.
+--- @param  toklist tabuser_toklist The token list to store.
+--- @return user_tok -              A token representing the fake register.
 local function toklist_to_faketoks(toklist)
     local temp_char = lt.tex:mangle_name {
         name = "toklist_to_faketoks_tmp",
@@ -904,7 +942,7 @@ local function toklist_to_faketoks(toklist)
     scratch_user_whatsit.type = user_whatsit_types.toklist
     scratch_user_whatsit.value = toklist
     scratch_user_whatsit.type = user_whatsit_types.integer
-    local tok_id = scratch_user_whatsit.value
+    local tok_id = scratch_user_whatsit.value  --[[@as integer]]
 
 
     -- \TeX{} expects two levels of indirection for a \tex{toks} token, so we
@@ -951,8 +989,8 @@ local function token_to_toks_register(name, fake_tok)
 end
 
 
---- @param  name    name_params The name of the register.
---- @param  toklist tab_toklist The token list to store.
+--- @param  name    name_params     The name of the register.
+--- @param  toklist tabuser_toklist The token list to store.
 --- @return nil -          -
 function luatools.token:set_toks_register(name, toklist)
     self = self.self
@@ -967,8 +1005,8 @@ end
 --=
 --= Converts a token list to a string.
 
---- @param  toklist tab_toklist The token list to convert.
---- @return string -            The string representation of the token list.
+--- @param  toklist tabuser_toklist The token list to convert.
+--- @return string  -               The string representation of the token list.
 function luatools.token:toklist_to_str(toklist)
     self = self.self
 
@@ -1938,6 +1976,101 @@ function luatools.macro:define(params)
 end
 
 
+--= \subsection{\typ{luatools.macro:get_csname_from_arg}}
+--=
+--= Gets the csname of the macro where the command is inside its argument.
+
+--- @return csname_tok? csname The csname of the macro.
+function luatools.macro:get_csname_from_arg()
+    self = self.self
+
+    -- This gives us a token representing the csname of a macro if we are inside
+    -- one of its scanned arguments.
+    local enclosing_tokid = status.inputid
+
+    -- Now, we transform this into a \typ{user_tok}
+    local enclosing_usertok = self.token:new { 0, 0, enclosing_tokid }
+
+    -- If this token points to a macro, then we return its csname
+    if enclosing_usertok.cmdname:match("call") then
+        return enclosing_usertok.csname
+    else
+        return nil
+    end
+end
+
+
+--= \subsection{\typ{luatools.macro:get_complete_argument}}
+--=
+--= Gets the entirety of an argument to a macro, from anywhere within one of its
+--= grabbed arguments.
+
+--= Helper function for \lua{luatools.macro:get_complete_argument}.
+--- @param  jobname string  The original jobname.
+--- @return string  jobname The processed jobname.
+local function process_jobname(jobname)
+    -- Save the value of \tex{errorcontextlines} and set it to the maximum
+    local errorcontextlines = tex.errorcontextlines
+    tex.errorcontextlines = tex.dimen.maxdimen
+
+    -- Inside the \typ{process_jobname} callback, all printing is redirected
+    -- to a string, so when we run \typ{show_context}, it is captured in the
+    -- \typ{jobname} variable.
+    tex.show_context()
+
+    -- Restore the value of \tex{errorcontextlines}
+    tex.errorcontextlines = errorcontextlines
+
+    -- Return an empty string so that \tex{jobname} has only the captured
+    -- value.
+    return ""
+end
+
+--- @return string? argument The entirety of the argument.
+function luatools.macro:get_complete_argument()
+    self = self.self
+
+    local csname  = self.macro:get_csname_from_arg()
+    local meaning = self.token.get_meaning(csname)
+
+    if not meaning then
+        return nil
+    end
+
+    -- Grab the output of \lua{tex.show_context()}
+    -- TODO use proper callback management here
+    luatexbase.add_to_callback(
+        "process_jobname",
+        process_jobname,
+        "special_jobname"
+    )
+    local showed_context  = tex.jobname
+
+    luatexbase.remove_from_callback("process_jobname", "special_jobname")
+
+    -- Extract the argument from the output
+    local meaning_pattern = escape_pattern(
+        utf_char(self.tex.escapechar --[[@as integer]]) ..
+        csname ..
+        meaning
+    )
+    local pattern = "<argument> (.-)" .. meaning_pattern:gsub("#", "%%s-#")
+    local argument = showed_context:match(pattern)
+
+    if not argument then
+        return nil
+    end
+
+    -- Collapse multiple spaces into one
+    argument = argument:gsub("%s+", " ")
+
+    -- Post-process the argument
+    argument = self.verbatim:_postprocess(argument, false)
+
+    return argument
+end
+
+
 --=-----------------------
 --= \section{Verbatim} ---
 --=-----------------------
@@ -2044,15 +2177,16 @@ do
 end
 
 
---= \subsection{\typ{luatools.verbatim:grab_until}}
+--= \subsection{\typ{luatools.verbatim:_postprocess}}
 --=
---= Grabs contents as a verbatim string until the specified tokens are found.
-
 --= Post-processes the grabbed text.
+
 --- @param  text        string The grabbed text.
 --- @param  outer_level boolean Whether the text was grabbed at the outer level.
 --- @return string      -       The post-processed text.
-local function verb_postprocess(text, outer_level)
+function luatools.verbatim:_postprocess(text, outer_level)
+    self = self.self
+
     -- Replace the \tex{endlinechar} with a newline
     local endlinechar = utf_char(lt.tex.endlinechar --[[@as integer]])
     text = text:gsub(endlinechar, "\n")
@@ -2063,15 +2197,20 @@ local function verb_postprocess(text, outer_level)
         -- this dynamically each time since the catcodes might have changed.
         local letters = {}
         local others  = {}
+        local param_char = "#"
 
         for charcode = 0, 255 do
             local catcode = tex.catcode[charcode]
             local char    = utf_char(charcode)
 
-            if catcode == lt.token.cmd["letter"] then
+            if catcode == self.token.cmd["letter"] then
                 insert(letters, char)
-            elseif catcode ~= lt.token.cmd["invalid_char"] then
+            elseif catcode ~= self.token.cmd["invalid_char"] then
                 insert(others, char)
+            end
+
+            if catcode == self.token.cmd["mac_param"] then
+                param_char = char
             end
         end
 
@@ -2080,7 +2219,7 @@ local function verb_postprocess(text, outer_level)
 
         -- Define patterns to match single characters by their catcodes.
         local any_char    = P(1)
-        local escape_char = P(utf_char(lt.tex.escapechar --[[@as integer]]))
+        local escape_char = P(utf_char(self.tex.escapechar --[[@as integer]]))
         local letters     = S(concat(letters))
         local others      = S(concat(others) )
 
@@ -2102,7 +2241,7 @@ local function verb_postprocess(text, outer_level)
         local control_word_space = control_word * remove_space
 
         -- Find \tex{the}\tex{partokenname}
-        local partoken_csname = (saved_partokenname or {}).csname or P(false)
+        local partoken_csname = (saved_partokenname or {}).csname or P("par")
         local partoken        = escape_char * partoken_csname * P(" ")
 
         -- One newline in the source maps to a plain space (unfortunately), two
@@ -2119,16 +2258,27 @@ local function verb_postprocess(text, outer_level)
             end
         )
 
+        -- Undouble any parameter tokens
+        local param          = P(param_char)
+        local undouble_param = (param * param) / param_char
+
         -- We want to match this pattern anywhere in the text.
-        local anywhere = (partoken_nl + control_word_space + any_char)^0
+        local anywhere = partoken_nl +
+                         control_word_space +
+                         undouble_param +
+                         any_char
 
         -- Do the actual replacement
-        text = match(Cs(anywhere), text)
+        text = match(Cs(anywhere^0), text)
     end
 
     return text
 end
 
+
+--= \subsection{\typ{luatools.verbatim:grab_until}}
+--=
+--= Grabs contents as a verbatim string until the specified tokens are found.
 
 do
     -- Here, we define a Lua macro that we can place in the body of the
@@ -2206,7 +2356,7 @@ do
         end
 
         -- Post-process the grabbed text
-        return verb_postprocess(verb_grabber_out, outer_level)
+        return self.verbatim:_postprocess(verb_grabber_out, outer_level)
     end
 end
 
@@ -2228,7 +2378,103 @@ function luatools.verbatim:grab_braced()
     pop_catcodes()
 
     -- Post-process the grabbed text
-    return verb_postprocess(text, outer_level)
+    return self.verbatim:_postprocess(text, outer_level)
+end
+
+
+--= \subsection{\typ{luatools.verbatim:grab_file}}
+--=
+--= Grabs a verbatim string from a file.
+
+--- @param  grabbed_text string The text that has already been grabbed.
+--- @param  start_str    string The starting delimiter.
+--- @param  end_str      string The ending delimiter.
+--- @return string?      -      The contents of the file.
+function luatools.verbatim:grab_file(grabbed_text, start_str, end_str)
+    -- Get the ending input parameters
+    local file_name      = status.filename
+    local end_line_given = status.linenumber
+
+    -- Try to read the text from the file
+    local file_lines = (io.loaddata(file_name) or ""):splitlines()
+
+    if #file_lines < end_line_given then
+        return nil
+    end
+
+    -- Search for the beginning/end of the text in the file
+    local start_line, start_pos  --- @type integer, integer?
+    local end_line,   end_pos    --- @type integer, integer?
+
+    for line_num = end_line_given, 1, -1 do
+        local line = file_lines[line_num]
+        local matches
+
+        if not end_pos then
+            matches  = line:find_all(end_str, nil, true)
+            end_pos  = (matches[#matches] or {})[1]
+            end_line = line_num
+        end
+
+        if end_pos and not start_pos then
+            matches    = line:find_all(end_str, nil, true)
+            start_pos  = (matches[1] or {})[2]
+            start_line = line_num
+        end
+
+        if (start_line == end_line) and (start_pos >= end_pos) then
+            start_pos = nil
+        end
+
+        if end_pos and start_pos then
+            break
+        end
+    end
+
+    -- Make sure that we found the delimiters for the text
+    if (not start_pos) or (not end_pos) then
+        return nil
+    end
+
+    -- Make sure that there aren't multiple instances of the delimiters
+    local selected_lines = slice(file_lines, start_line, end_line_given)
+    local selected_text  = table.concat(selected_lines, "\n")
+
+    local start_count = selected_text:count(escape_pattern(start_str))
+    local end_count   = selected_text:count(escape_pattern(end_str))
+
+    if start_str == end_str then
+        -- There should be exactly two instances of the delimiter
+        if start_count ~= 2 then
+            return nil
+        end
+    else
+        -- There should be exactly one instance of each delimiter
+        if start_count ~= 1 or end_count ~= 1 then
+            return nil
+        end
+    end
+
+    -- Extract the text from the file
+    local extracted = ""
+    start_pos = start_pos + 1
+    end_pos   = end_pos   - 1
+
+    for line_num = start_line, end_line do
+        local line = file_lines[line_num] .. "\n"
+
+        if (line_num == start_line) and (line_num == end_line) then
+            line = line:sub(start_pos, end_pos)
+        elseif line_num == start_line then
+            line = line:sub(start_pos)
+        elseif line_num == end_line then
+            line = line:sub(1, end_pos)
+        end
+
+        extracted = extracted .. line
+    end
+
+    return extracted
 end
 
 
@@ -2241,31 +2487,79 @@ end
 function luatools.verbatim:grab_any()
     self = self.self
 
+    -- See if we're at the outer level
+    local outer_level = (status.input_ptr <= 2)
+
     -- Get the first token
-    local first = self.token.get_next()
+    local start_tok = self.token.get_next()  --- @type user_tok|csname_tok
+
+    -- How we can grab the following text depends on the what the first token
+    -- is.
+    local grabbed_text  --- @type string
+    local start_str     --- @type string
+    local end_str       --- @type string
 
     -- If the first token is an opening brace, then scan until a balanced
     -- closing brace is found.
-    if first.command == lt.token.cmd["left_brace"] then
-        self.token:push { first }
-        return self.verbatim:grab_braced()
+    if start_tok.command == lt.token.cmd["left_brace"] then
+        --- @cast start_tok -csname_tok
+        start_str, end_str = "{", "}"
+        self.token:push { start_tok }
+        grabbed_text = self.verbatim:grab_braced()
 
-    -- If the first token is a control sequence, then scan until we find the
-    -- control sequence again.
-    elseif first.csname then
-        return self.verbatim:grab_until("\\" .. first.csname)
+    -- Active characters are a bit special, so we'll handle them separately.
+    elseif start_tok.active then
+        local char = start_tok.csname  --- @cast char -nil
+        start_str, end_str = char, char
+
+        if outer_level then
+            start_tok = char
+        else
+            start_tok = { start_tok }
+        end
+
+        grabbed_text = self.verbatim:grab_until(start_tok)
 
     -- If the first token is a character, then scan until the same character is
     -- found.
-    elseif first.command >= lt.token.cmd["min_char_code"] and
-           first.command <= lt.token.cmd["max_char_code"]
+    elseif start_tok.command >= lt.token.cmd["min_char_code"] and
+           start_tok.command <= lt.token.cmd["max_char_code"]
     then
-        return self.verbatim:grab_until(utf_char(first.mode))
+        local char = utf_char(start_tok.mode)
+        start_str, end_str = char, char
+        grabbed_text = self.verbatim:grab_until(char)
+
+    -- If the first token is a control sequence, then scan until we find the
+    -- control sequence again.
+    elseif start_tok.csname then
+        local control_seq = utf_char(self.tex.escapechar --[[@as integer]]) ..
+                            start_tok.csname
+        start_str, end_str = control_seq, control_seq
+        grabbed_text = self.verbatim:grab_until(control_seq)
 
     -- Otherwise, scan for this exact token.
     else
-        return self.verbatim:grab_until(first)
+        --- @cast start_tok -csname_tok
+        local str = self.token:toklist_to_str { start_tok }
+        start_str, end_str = str, str
+        grabbed_text = self.verbatim:grab_until(start_tok)
     end
+
+    -- If we're nested inside a macro, the text has already been tokenized so
+    -- some information is lost. In this case, we'll try to read the text
+    -- directly from the file, although we'll fall back to the above method if
+    -- this fails.
+    if not outer_level then
+        local grabbed_file = self.verbatim:grab_file(
+            grabbed_text, start_str, end_str
+        )
+
+        if grabbed_file then
+            return grabbed_file
+        end
+    end
+
+    return grabbed_text
 end
 
 
@@ -2279,10 +2573,9 @@ end
 --- @alias user_whatsit luatex.node.whatsit.user_defined
 --- @alias list_node luatex.node.list
 
---- @class luatools.node: _lt_base A table containing node functions.
---- @field self     luatools       The module root.
---- @field [string] fun(...):...   A wrapper around the \LuaTeX{} \typ{node}
----                                functions.
+--- @class luatools.node: luatex.nodelib A table containing node functions.
+--- @field self           luatools       The module root.
+
 luatools.node = setmetatableindex(function(t, k)
 --= LuaMeta\TeX{} removes underscores from most of its \typ{node} functions, so
 --= we'll try removing any underscores if we can't find the function.
@@ -2474,6 +2767,7 @@ end
 --=
 --= Frees a node and all of its children.
 
+--- @diagnostic disable-next-line: undefined-field
 local _free_recursive = luatex_lmtx(node.flush_node, node.flushnode)
 
 --- @param  node node The node to free.
@@ -2487,6 +2781,7 @@ end
 --=
 --= Frees a node and all of the nodes that follow it.
 
+--- @diagnostic disable-next-line: undefined-field
 local _free_following = luatex_lmtx(node.flush_list, node.flushlist)
 
 --- @param  head node The head of the node list to free.
