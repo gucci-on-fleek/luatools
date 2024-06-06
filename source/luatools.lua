@@ -604,6 +604,44 @@ function string.find_all(str, pattern, init, plain)
 end
 
 
+--= \subsection{\typ{luatools.util:convert}}
+--=
+--= Converts values between different types.
+
+do
+    -- A \typ{user_defined} whatsit node that we can use to convert between
+    -- various internal \LuaTeX{} datatypes.
+    local scratch_user_whatsit = node.new("whatsit", "user_defined") --[[
+        @as user_whatsit]]
+
+    -- The possible types of a \tex{user_defined} whatsit node.
+    --- @enum (key) convert_types
+    local user_whatsit_types = {
+        attribute = utf_code "a",
+        integer   = utf_code "d",
+        lua       = utf_code "l",
+        node      = utf_code "n",
+        string    = utf_code "s",
+        toklist   = utf_code "t",
+    }
+
+    --- @alias _ct convert_types
+    --- @overload fun(self:self, val:any, from:_ct, to:"attribute"): node
+    --- @overload fun(self:self, val:any, from:_ct, to:"integer"  ): integer
+    --- @overload fun(self:self, val:any, from:_ct, to:"lua"      ): any?
+    --- @overload fun(self:self, val:any, from:_ct, to:"node"     ): node
+    --- @overload fun(self:self, val:any, from:_ct, to:"string"   ): string
+    --- @overload fun(self:self, val:any, from:_ct, to:"toklist"  ): tab_toklist
+    function luatools.util:convert(val, from, to)
+        scratch_user_whatsit.type  = user_whatsit_types[from]
+        scratch_user_whatsit.value = val
+        scratch_user_whatsit.type  = user_whatsit_types[to]
+
+        return scratch_user_whatsit.value
+    end
+end
+
+
 --=---------------------------------
 --= \section{Tokens (Low-Level)} ---
 --=---------------------------------
@@ -909,22 +947,6 @@ end
 --=
 --= Sets a \tex{toks} register to the given token list.
 
---= A \typ{user_defined} whatsit node that we can use to convert between
---= various internal \LuaTeX{} datatypes.
-local scratch_user_whatsit = node.new("whatsit", "user_defined") --[[
-    @as user_whatsit]]
-
---= The possible types of a \tex{user_defined} whatsit node.
---- @enum user_whatsit_type
-local user_whatsit_types = {
-    attribute = utf_code "a",
-    integer   = utf_code "d",
-    lua       = utf_code "l",
-    node      = utf_code "n",
-    string    = utf_code "s",
-    toklist   = utf_code "t",
-}
-
 --= Stores a \typ{tab_toklist} in a “fake” \tex{toks} register (without giving
 --= it a name).
 ---
@@ -939,10 +961,7 @@ local function toklist_to_faketoks(toklist)
 
     -- We need to save the token list into the \TeX{} hash table to be able to
     -- access it in \TeX{}.
-    scratch_user_whatsit.type = user_whatsit_types.toklist
-    scratch_user_whatsit.value = toklist
-    scratch_user_whatsit.type = user_whatsit_types.integer
-    local tok_id = scratch_user_whatsit.value  --[[@as integer]]
+    local tok_id = lt.util:convert(toklist, "toklist", "integer")
 
 
     -- \TeX{} expects two levels of indirection for a \tex{toks} token, so we
@@ -1049,10 +1068,7 @@ function luatools.token:to_tab_toklist(in_toklist)
         local inner_ptr = (lt.token:new { 0, 0, outer_ptr }).mode
 
         -- Extract the tokens
-        scratch_user_whatsit.type  = user_whatsit_types.integer
-        scratch_user_whatsit.value = inner_ptr
-        scratch_user_whatsit.type  = user_whatsit_types.toklist
-        local out_toklist = scratch_user_whatsit.value --[[@as tab_toklist]]
+        local out_toklist = lt.util:convert(inner_ptr, "integer", "toklist")
 
         return slice(out_toklist, 2)
     else
@@ -1732,13 +1748,7 @@ local function macro_to_toklist(name)
         return --- @diagnostic disable-line: missing-return-value
     end
 
-    -- We use a \typ{user_defined} whatsit node to convert the macro to a token
-    -- list.
-    scratch_user_whatsit.type  = user_whatsit_types.integer
-    scratch_user_whatsit.value = macro.mode
-    scratch_user_whatsit.type  = user_whatsit_types.toklist
-
-    return scratch_user_whatsit.value --[[@as tab_toklist]]
+    return lt.util:convert(macro.mode, "integer", "toklist")
 end
 
 
@@ -1851,10 +1861,7 @@ function luatools.macro:from_toklist(name, params, body, type)
     append(toklist, body)
 
     -- Save the token list into \typ{eqtb} and get a pointer to it
-    scratch_user_whatsit.type  = user_whatsit_types.toklist
-    scratch_user_whatsit.value = toklist
-    scratch_user_whatsit.type  = user_whatsit_types.integer
-    local macro_ptr = scratch_user_whatsit.value --[[@as integer]]
+    local macro_ptr = lt.util:convert(toklist, "toklist", "integer")
 
     -- Get the command code for the macro
     local cmd --- @type integer
@@ -2855,6 +2862,135 @@ function luatools.node:replace(head, find, replace)
 end
 
 
+--= \subsection{\typ{luatools.node:map}}
+--=
+--= Maps a function over a list of nodes.
+
+--- @class (exact) _node_map: _node_query The parameters for mapping over a
+---                                       list of nodes.
+--- @field func (fun(n:node):...:node)|(fun(n:node):boolean?)
+---             The function to apply to each node.
+
+--- @param  params _node_map The parameters for mapping over the list.
+--- @return node   head      The new head for the list.
+function luatools.node:map(params)
+    self = self.self
+
+    local head = params.node
+
+    -- Save all the nodes in a table so that the mapping function can safely
+    -- modify the `next` pointers without breaking the traversal.
+    local given_nodes = {} --- @type node[]
+    for n in self.node.traverse(head) do
+        insert(given_nodes, n)
+    end
+
+    -- Apply the function to each node
+    local out_nodes = {} --- @type node[]
+    for _, n in ipairs(given_nodes) do
+        params.node = n
+        if self.node:query(params) then
+            local out = { params.func(n) }
+            local first = out[1]
+            if first == nil or first == true then
+                -- If the function returns \lua{nil} or \lua{true}, then we
+                -- add the node to the list as-is.
+                insert(out_nodes, n)
+            elseif first == false then
+                -- If the function returns \lua{false}, then we skip the node.
+            else
+                -- Otherwise, we add the returned nodes to the list.
+                append(out_nodes, out)
+            end
+        else
+            insert(out_nodes, n)
+        end
+    end
+
+    return self.node:join(out_nodes)
+end
+
+
+--= \subsection{\typ{luatools.node:map_recurse}}
+--=
+--= Maps a function over a list of nodes and through all of their nested lists.
+
+--- @param  params _node_map The parameters for mapping over the list.
+--- @return node   head      The new head for the list.
+function luatools.node:map_recurse(params)
+    self = self.self
+
+    local head = params.node
+    local func = params.func
+
+    head = self.node:map {
+        node = head,
+        func = function(n)
+            local out = n  --- @type node|boolean?
+
+            params.node = n
+            if self.node:query(params) then
+                out = func(n)
+            end
+
+            if n.list then
+                --- @cast n list_node
+                params.node = n.list
+                n.list = self.node:map_recurse(params)
+            end
+
+            return out
+        end
+    }
+
+    return head
+end
+
+
+--= \subsection{\typ{luatools.node:get_next}}
+--=
+--= Gets the next node in a list that matches the specified criteria.
+
+--- @class (exact) _node_get_next: _node_query The criteria to search for.
+--- @field direction? "forward"|"backward"     The direction to search in.
+
+--- @param  criteria _node_get_next The criteria to search for.
+--- @return node? -                 The first node that matches the criteria.
+function luatools.node:get_next(criteria)
+    self = self.self
+
+    local head      = criteria.node
+    local direction = criteria.direction or "forward"
+
+    if direction == "forward" then
+        -- Use the standard traverser, but stop at the first match
+        for n in self.node.traverse(head) do
+            criteria.node = n
+            if self.node:query(criteria) then
+                return n
+            end
+        end
+    elseif direction == "backward" and self.fmt.lmtx then
+        -- LuaMetaTeX has a builtin reverse traversal function
+        for n in self.node.traverse(head, true) do
+            if self.node:query(criteria) then
+                return n
+            end
+        end
+    elseif direction == "backward" and not self.fmt.lmtx then
+        -- For LuaTeX, we need to manually traverse the list in reverse
+        local n = head
+        while n do
+            if self.node:query(criteria) then
+                return n
+            end
+            n = n.prev
+        end
+    else
+        lt.msg:error("Invalid direction: " .. direction)
+    end
+end
+
 --= \subsection{\typ{luatools.node:to_str}}
 --=
 --= Converts the contents of a node list to a string.
@@ -2941,136 +3077,6 @@ function luatools.node:from_str(text, catcodes)
 
     -- Return the inner list
     return self.node:free_only(out_node)
-end
-
-
---= \subsection{\typ{luatools.node:get_next}}
---=
---= Gets the next node in a list that matches the specified criteria.
-
---- @class (exact) _node_get_next: _node_query The criteria to search for.
---- @field direction? "forward"|"backward"     The direction to search in.
-
---- @param  criteria _node_get_next The criteria to search for.
---- @return node? -                 The first node that matches the criteria.
-function luatools.node:get_next(criteria)
-    self = self.self
-
-    local head      = criteria.node
-    local direction = criteria.direction or "forward"
-
-    if direction == "forward" then
-        -- Use the standard traverser, but stop at the first match
-        for n in self.node.traverse(head) do
-            criteria.node = n
-            if self.node:query(criteria) then
-                return n
-            end
-        end
-    elseif direction == "backward" and self.fmt.lmtx then
-        -- LuaMetaTeX has a builtin reverse traversal function
-        for n in self.node.traverse(head, true) do
-            if self.node:query(criteria) then
-                return n
-            end
-        end
-    elseif direction == "backward" and not self.fmt.lmtx then
-        -- For LuaTeX, we need to manually traverse the list in reverse
-        local n = head
-        while n do
-            if self.node:query(criteria) then
-                return n
-            end
-            n = n.prev
-        end
-    else
-        lt.msg:error("Invalid direction: " .. direction)
-    end
-end
-
-
---= \subsection{\typ{luatools.node:map}}
---=
---= Maps a function over a list of nodes.
-
---- @class (exact) _node_map: _node_query The parameters for mapping over a
----                                       list of nodes.
---- @field func (fun(n:node):...:node)|(fun(n:node):boolean?)
----             The function to apply to each node.
-
---- @param  params _node_map The parameters for mapping over the list.
---- @return node   head      The new head for the list.
-function luatools.node:map(params)
-    self = self.self
-
-    local head = params.node
-
-    -- Save all the nodes in a table so that the mapping function can safely
-    -- modify the `next` pointers without breaking the traversal.
-    local given_nodes = {} --- @type node[]
-    for n in self.node.traverse(head) do
-        insert(given_nodes, n)
-    end
-
-    -- Apply the function to each node
-    local out_nodes = {} --- @type node[]
-    for _, n in ipairs(given_nodes) do
-        params.node = n
-        if self.node:query(params) then
-            local out = { params.func(n) }
-            local first = out[1]
-            if first == nil or first == true then
-                -- If the function returns \lua{nil} or \lua{true}, then we
-                -- add the node to the list as-is.
-                insert(out_nodes, n)
-            elseif first == false then
-                -- If the function returns \lua{false}, then we skip the node.
-            else
-                -- Otherwise, we add the returned nodes to the list.
-                append(out_nodes, out)
-            end
-        else
-            insert(out_nodes, n)
-        end
-    end
-
-    return self.node:join(out_nodes)
-end
-
-
---= \subsection{\typ{luatools.node:map_recurse}}
---=
---= Maps a function over a list of nodes and through all of their nested lists.
-
---- @param  params _node_map The parameters for mapping over the list.
---- @return node   head      The new head for the list.
-function luatools.node:map_recurse(params)
-    self = self.self
-
-    local head = params.node
-    local func = params.func
-
-    head = self.node:map {
-        node = head,
-        func = function(n)
-            local out = n  --- @type node|boolean?
-
-            params.node = n
-            if self.node:query(params) then
-                out = func(n)
-            end
-
-            if n.list then
-                --- @cast n list_node
-                params.node = n.list
-                n.list = self.node:map_recurse(params)
-            end
-
-            return out
-        end
-    }
-
-    return head
 end
 
 
