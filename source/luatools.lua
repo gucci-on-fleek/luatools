@@ -2522,6 +2522,7 @@ function luatools.verbatim:grab_any()
         if outer_level then
             start_tok = char
         else
+            --- @diagnostic disable-next-line: missing-fields
             start_tok = { start_tok }
         end
 
@@ -2597,6 +2598,7 @@ end)
 --= Gets the type and subtype of a node as pair of strings.
 
 local node_id_to_type = node.types()
+local node_type_to_id = table_swapped(node_id_to_type)
 local node_subid_to_subtype = {}
 
 for id, name in pairs(node_id_to_type) do
@@ -2606,7 +2608,6 @@ end
 --= LuaMeta\TeX{} gives different names to some node types, and these names are
 --= generally much more sensible, so we'll use the same names for \LuaTeX{} too.
 if not lt.fmt.lmtx then
-    local node_type_to_id = table_swapped(node_id_to_type)
 
     -- Inserts
     local insert_id = node_type_to_id["ins"]
@@ -2817,9 +2818,186 @@ function luatools.node:free_only(node)
 end
 
 
+--= \subsection{\typ{luatools.node:iterate}}
+--=
+--= Quickly iterates over a list of nodes. Note that this function is quite
+--= strict about the queries that it accepts; for more flexibility, use the
+--= \typ{luatools.node:map} function.
+--=
+--= I've benchmarked this, and using the full userdata nodes is faster than
+--= using the direct nodes. I'm not sure why this is the case, but it's better
+--= anyways since the userdata nodes are much nicer to work with.
+
+--- @diagnostic disable: undefined-field
+local find_attribute = luatex_lmtx(node.find_attribute, node.findattribute)
+local traverse       = node.traverse
+local traverse_id    = luatex_lmtx(node.traverse_id, node.traverseid)
+local traverse_list  = luatex_lmtx(node.traverse_list, node.traverse_list)
+local traverse_char  = luatex_lmtx(node.traverse_glyph, node.traverse_glyph)
+--- @diagnostic enable: undefined-field
+
+-- A dummy node that we can use to get at the internal traversal functions
+local dummy_node = node.new("attribute")
+
+local traverser      = traverse(dummy_node)
+local traverser_list = traverse_list(dummy_node)
+local traverser_char = traverse_char(dummy_node)
+
+
+--= Iterates over a list of nodes with matching types.
+--- @param  head    node    The head of the list to iterate over.
+--- @param  type_id integer The type of node to check for.
+--- @return fun(head: node, n?: node): node?, integer?
+--- @return node head
+local function iterate_type(head, type_id)
+    local traverser_id = traverse_id(type_id, dummy_node)
+
+    return traverser_id, head
+end
+
+
+--= Iterates over a list of nodes with matching attributes.
+--- @param  head    node    The head of the list to iterate over.
+--- @param  attr_id integer The attribute to check for.
+--- @return fun(head: node, n?: node): node?, integer?
+--- @return node head
+local function iterate_attr(head, attr_id)
+    return function(head, n)
+        if n then
+            n = n.next
+        else
+            n = head
+        end
+
+        if not n then
+            return
+        end
+
+        local attr_val
+        attr_val, n = find_attribute(n, attr_id)
+        return n, attr_val
+    end, head
+end
+
+
+--= Iterates over a list of nodes with matching types and attributes.
+--- @param  head    node    The head of the list to iterate over.
+--- @param  attr_id integer The attribute to check for.
+--- @param  type_id integer The type of node to check for.
+--- @return fun(head: node, n?: node): node?, integer?, integer?
+--- @return node head
+local function iterate_attr_type(head, attr_id, type_id)
+    local traverser_id = traverse_id(type_id, dummy_node)
+
+    return function(head, n)
+        local val, m, subid
+        repeat
+            n, subid = traverser_id(head, n)
+
+            if not n then
+                return
+            end
+
+            val, m = find_attribute(n, attr_id)
+
+            if n == m then
+                break
+            end
+
+            head = m
+            n = nil
+        until not n and not head
+
+        return n, val, subid
+    end, head
+end
+
+
+--= Iterates over a list of nodes that contain the specified field.
+--- @param  head    node    The head of the list to iterate over.
+--- @param  field   string  The field to check for.
+--- @return fun(head: node, n?: node): node?, ...
+--- @return node head
+local function iterate_field(head, field)
+    if field == "char" then
+        return traverser_char, head
+    elseif field == "list" then
+        return traverser_list, head
+    else
+        return function(head, n)
+            repeat
+                n = traverser(head, n)
+                if n and n[field] then
+                    return n.next, n[field]
+                end
+            until not n
+        end, head
+    end
+end
+
+
+--- @param  params _node_query The parameters for the iteration.
+--- @return fun(head: node, n?: node): node?, ...
+--- @return node head
+function luatools.node:iterate(params)
+    self = self.self
+
+    params.is   = query_to_table(params.is  )
+    params.has  = query_to_table(params.has )
+    params.attr = query_to_table(params.attr)
+
+    local type_id
+    if #params.is == 0 then
+        -- Ok
+    elseif #params.is == 1 then
+        type_id = node_type_to_id[params.is[1]]
+    else
+        lt.msg:error("Only one type can be specified.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    local attr_id
+    if #params.attr == 0 then
+        -- Ok
+    elseif #params.attr == 1 then
+        attr_id = self.tex:_get_token(params.attr[1]).index
+    else
+        lt.msg:error("Only one attribute can be specified.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    local field
+    if #params.has == 0 then
+        -- Ok
+    elseif #params.has == 1 then
+        field = params.has[1]
+    else
+        lt.msg:error("Only one field can be specified.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    local head = params.node
+
+    if type_id and attr_id and not field then
+        return iterate_attr_type(head, attr_id, type_id)
+    elseif type_id and not attr_id and not field then
+        return iterate_type(head, type_id)
+    elseif not type_id and attr_id and not field then
+        return iterate_attr(head, attr_id)
+    elseif not type_id and not attr_id and field then
+        return iterate_field(head, field)
+    else
+        lt.msg:error("Invalid query.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+end
+
+
 --= \subsection{\typ{luatools.node:join}}
 --=
 --= Joins a list of nodes into a node list.
+
+local slide = node.slide
 
 --- @param  nodes node[] The nodes to join.
 --- @return node  head   The head of the new node list.
@@ -2832,7 +3010,7 @@ function luatools.node:join(nodes)
     end
 
     -- Add the `prev` pointers to each node
-    node.slide(head)
+    slide(head)
 
     return head
 end
@@ -2842,21 +3020,24 @@ end
 --=
 --= Replaces a specified node in a node list with another node.
 
+local remove_node = node.remove
+--- @diagnostic disable-next-line: undefined-field
+local insert_before = luatex_lmtx(node.insert_before, node.insertbefore)
+
 --- @param  head    node The head of the list that contains \typ{find}
 --- @param  find    node The node to remove
 --- @param  replace node The node to insert
 --- @return node    head The new head of the list
 function luatools.node:replace(head, find, replace)
-    self = self.self
-
     -- Remove `find` from the list
-    local head, current = self.node.remove(head, find)
+    local head, current = remove_node(head, find)
 
     -- Insert `replace` in its place
-    head, replace = self.node.insert_before(head, current, replace)
+    --- @cast current -nil
+    head, replace = insert_before(head, current, replace)
 
     -- Free `find`
-    self.node:free_recursive(find)
+    _free_recursive(find)
 
     return head
 end
@@ -2864,7 +3045,9 @@ end
 
 --= \subsection{\typ{luatools.node:map}}
 --=
---= Maps a function over a list of nodes.
+--= Maps a function over a list of nodes. Note that this function is quite slow,
+--= so it's better to use \typ{luatools.node:iterate} function if you don't need
+--= to modify the nodes.
 
 --- @class (exact) _node_map: _node_query The parameters for mapping over a
 ---                                       list of nodes.
@@ -2881,7 +3064,7 @@ function luatools.node:map(params)
     -- Save all the nodes in a table so that the mapping function can safely
     -- modify the `next` pointers without breaking the traversal.
     local given_nodes = {} --- @type node[]
-    for n in self.node.traverse(head) do
+    for n in traverse(head) do
         insert(given_nodes, n)
     end
 
@@ -2914,6 +3097,8 @@ end
 --= \subsection{\typ{luatools.node:map_recurse}}
 --=
 --= Maps a function over a list of nodes and through all of their nested lists.
+--= Note that this function is quite slow, so it's better to use an alternative
+--= if possible.
 
 --- @param  params _node_map The parameters for mapping over the list.
 --- @return node   head      The new head for the list.
@@ -2964,7 +3149,7 @@ function luatools.node:get_next(criteria)
 
     if direction == "forward" then
         -- Use the standard traverser, but stop at the first match
-        for n in self.node.traverse(head) do
+        for n in traverse(head) do
             criteria.node = n
             if self.node:query(criteria) then
                 return n
@@ -2972,7 +3157,8 @@ function luatools.node:get_next(criteria)
         end
     elseif direction == "backward" and self.fmt.lmtx then
         -- LuaMetaTeX has a builtin reverse traversal function
-        for n in self.node.traverse(head, true) do
+        --- @diagnostic disable-next-line: redundant-parameter
+        for n in traverse(head, true) do
             if self.node:query(criteria) then
                 return n
             end
@@ -3017,12 +3203,15 @@ function luatools.node:to_str(head)
 
     local chars = {}
 
-    for n in self.node.traverse(head) do
+    for n in traverse(head) do
         if self.node:is(n, "glyph") then
+            --- @cast n GlyphNode
             insert(chars, font_to_unicode[n.font][n.char])
         elseif self.node:is(n, "glue") then
+            --- @cast n GlueNode
             insert(chars, " ")
-        elseif n.list or n.replace then
+        elseif n.list or n.replace then  --- @diagnostic disable-line
+            --- @cast n list_node|DiscNode
             insert(chars, self.node:to_str(n.list or n.replace))
         end
     end
