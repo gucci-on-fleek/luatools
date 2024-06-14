@@ -874,7 +874,7 @@ end)
 function luatools.token:set_csname(name, tok, scope)
     self = self.self
 
-    local csname = self.tex:mangle_name(name)
+    local csname = self.alloc:mangle_name(name)
 
     -- We need to define a token with the provided csname first, otherwise we
     -- get an `undefined_cs`-type token, which can't be passed to TeX without
@@ -953,7 +953,7 @@ end
 --- @param  toklist tabuser_toklist The token list to store.
 --- @return user_tok -              A token representing the fake register.
 local function toklist_to_faketoks(toklist)
-    local temp_char = lt.tex:mangle_name {
+    local temp_char = lt.alloc:mangle_name {
         name = "toklist_to_faketoks_tmp",
         visibility = "private",
         type = "weird",
@@ -991,7 +991,7 @@ local function token_to_toks_register(name, fake_tok)
     -- Clear the register
     tex.toks[name] = ""
 
-    local fake_tok_name = lt.tex:mangle_name {
+    local fake_tok_name = lt.alloc:mangle_name {
         name = "token_to_toks_register_tmp",
         type = "toks",
         visibility = "private",
@@ -1014,7 +1014,7 @@ end
 function luatools.token:set_toks_register(name, toklist)
     self = self.self
 
-    local csname = self.tex:mangle_name(name)
+    local csname = self.alloc:mangle_name(name)
     local fake_tok = toklist_to_faketoks(toklist)
     token_to_toks_register(csname, fake_tok)
 end
@@ -1030,7 +1030,7 @@ function luatools.token:toklist_to_str(toklist)
     self = self.self
 
     -- Allocate a new token register
-    local name = lt.tex:new_register {
+    local name = lt.alloc:new_register {
         name = "toklist_to_str_tmp",
         type = "toks",
         visibility = "private",
@@ -1054,10 +1054,10 @@ function luatools.token:to_tab_toklist(in_toklist)
 
     if type(in_toklist) == "string" then
         -- Get the current catcodes
-        local current_cctab = self.tex.catcodetable --[[@as integer]]
+        local current_cctab = self.tex.catcodetable
 
         -- Tokenize the string and store it in a \tex{toks} register
-        local register_csname = self.tex:new_register {
+        local register_csname = self.alloc:new_register {
             name = "to_tab_toklist_tmp",
             type = "toks",
         }
@@ -1091,27 +1091,18 @@ function luatools.token:to_tab_toklist(in_toklist)
 end
 
 
---=--------------------------------
---= \section{\TeX{} Interfaces} ---
---=--------------------------------
+--=-------------------------
+--= \section{Allocators} ---
+--=-------------------------
 --=
---= The \typ{luatools.tex} table is the high-level interface for working with
---= \TeX{} tokens and registers.
+--= The \typ{luatools.alloc} submodule contains functions for allocating new
+--= registers and other \TeX{} objects.
 
--- The typechecker doesn't like the `__index` metamethod, so we need to manually
--- forward-declare the types of the function methods.
-
---- @class luatools.tex: _lt_base A table containing \TeX{} functions.
---- @field self luatools          The module root.
---- @field mangle_name fun(self:self, params: name_params): string
---- @field new_register fun(self:self, params: name_params): string
---- @field _get_token fun(self:self, name: name_params): user_tok, csname_tok
---- @field [string] ((fun(...):nil))|integer|string|user_tok|nil -
----        Accessor for \TeX{} registers and macros.
-luatools.tex = {}
+--- @class luatools.alloc: _lt_base A table containing \TeX{} functions.
+luatools.alloc = {}
 
 
---= \subsection{\typ{luatools.tex:mangle_name}}
+--= \subsection{\typ{luatools.alloc:mangle_name}}
 --=
 --= Every \TeX{} format uses different naming conventions for their user-defined
 --= macros and registers, which makes it quite tricky to write cross-format
@@ -1173,7 +1164,7 @@ local cmdname_to_texname = table_swapped(texname_to_cmdname)
 
 --- @param  params name_params The parameters for the mangled name.
 --- @return string -           The mangled name.
-function luatools.tex:mangle_name(params)
+function luatools.alloc:mangle_name(params)
     self = self.self
 
     -- Pass through the name as-is if we're given a string
@@ -1261,13 +1252,13 @@ function luatools.tex:mangle_name(params)
 end
 
 
---= \subsection{\typ{luatools.tex:new_register}}
+--= \subsection{\typ{luatools.alloc:new_register}}
 --=
 --= Creates a new \TeX{} register with the given parameters.
 
 --- @param  params name_params  The parameters for the register.
 --- @return csname_tok name     The mangled name of the register.
-function luatools.tex:new_register(params)
+function luatools.alloc:new_register(params)
     self = self.self
 
     if params.type == "macro" then
@@ -1277,7 +1268,7 @@ function luatools.tex:new_register(params)
 
     -- Get the mangled name
     local name = self._name_cache[params.name] or
-                 self.tex:mangle_name(params)
+                 self.alloc:mangle_name(params)
 
     -- Check if the register is already defined
     local tok = self.token.cached[name]
@@ -1326,6 +1317,29 @@ function luatools.tex:new_register(params)
 end
 
 
+--=--------------------------------
+--= \section{\TeX{} Interfaces} ---
+--=--------------------------------
+--=
+--= The \typ{luatools.tex} table is the high-level interface for working with
+--= \TeX{} tokens and registers.
+
+--= We place the internal getter and setter functions in a separate table so
+--= that we don't interfere with the typechecker.
+--- @class luatools._tex: _lt_base A table holding the private getters/setters.
+luatools._tex = {}
+
+--- @class luatools.tex: _lt_base   A table for interfacing with \TeX{}.
+--- Below, we set the types of a few known fields to make the typechecker work.
+--- @field initcatcodetable fun(csname: any_tok): nil
+--- @field partokenname     any_tok
+--- @field catcodetable     integer
+--- @field endlinechar      integer
+--- @field escapechar       integer
+--- @field [string]         unknown Any field could potentially exist.
+luatools.tex = {}
+
+
 --= \subsection{\typ{luatools.tex:_get_token}}
 --=
 --= Gets the token corresponding to the given name.
@@ -1337,7 +1351,7 @@ end
 --- @param  given   string The requested variable name.
 --- @param  mangled string The mangled variable name.
 --- @return user_tok? -    The token corresponding to the variable.
-function luatools.tex:_get_token_aux(given, mangled)
+function luatools._tex:_get_token_aux(given, mangled)
     self = self.self
 
     local tok = self.token.cached[mangled]
@@ -1349,9 +1363,10 @@ end
 
 
 --- @param  name name_params    The name of the variable.
---- @return user_tok?   tok     The token corresponding to the variable.
---- @return csname_tok? mangled The mangled name of the variable.
-function luatools.tex:_get_token(name)
+--- @return user_tok   tok     The token corresponding to the variable.
+--- @return csname_tok mangled The mangled name of the variable.
+--- @overload fun(self: self, name: name_params): nil, nil
+function luatools._tex:_get_token(name)
     self = self.self
 
     -- Initialization
@@ -1364,8 +1379,8 @@ function luatools.tex:_get_token(name)
         local params = name
         name = params.name
 
-        mangled = self.tex:mangle_name(params)
-        tok = self.tex:_get_token_aux(name, mangled)
+        mangled = self.alloc:mangle_name(params)
+        tok = self._tex:_get_token_aux(name, mangled)
         return tok, mangled
 
     -- We need this check since otherwise the typechecker gets upset
@@ -1381,7 +1396,7 @@ function luatools.tex:_get_token(name)
 
     -- Check for the exact name
     mangled = name
-    tok = self.tex:_get_token_aux(name, mangled)
+    tok = self._tex:_get_token_aux(name, mangled)
     if tok then return tok, mangled end
 
     if self.config.expl then
@@ -1391,25 +1406,25 @@ function luatools.tex:_get_token(name)
                 local base, arguments = name:match("^(.-):(.*)$")
                 if arguments then
                     -- Macros
-                    mangled = self.tex:mangle_name {
+                    mangled = self.alloc:mangle_name {
                         name = base,
                         type = "macro",
                         arguments = arguments,
                         scope = scope,
                         visibility = visibility
                     }
-                    tok = self.tex:_get_token_aux(name, mangled)
+                    tok = self._tex:_get_token_aux(name, mangled)
                     if tok then return tok, mangled end
                 else
                     -- Registers
                     for type, _ in pairs(expl_types) do
-                        mangled = self.tex:mangle_name {
+                        mangled = self.alloc:mangle_name {
                             name = name,
                             type = type,
                             scope = scope,
                             visibility = visibility
                         }
-                        tok = self.tex:_get_token_aux(name, mangled)
+                        tok = self._tex:_get_token_aux(name, mangled)
                         if tok then return tok, mangled end
                     end
                 end
@@ -1417,19 +1432,19 @@ function luatools.tex:_get_token(name)
         end
     else
         -- Check for a private variable
-        mangled = self.tex:mangle_name {
+        mangled = self.alloc:mangle_name {
             name = name,
             visibility = "private"
         }
-        tok = self.tex:_get_token_aux(name, mangled)
+        tok = self._tex:_get_token_aux(name, mangled)
         if tok then return tok, mangled end
 
         -- Check for a public variable
-        mangled = self.tex:mangle_name {
+        mangled = self.alloc:mangle_name {
             name = name,
             visibility = "public"
         }
-        tok = self.tex:_get_token_aux(name, mangled)
+        tok = self._tex:_get_token_aux(name, mangled)
         if tok then return tok, mangled end
 
     end --- @diagnostic disable-line: missing-return
@@ -1444,11 +1459,11 @@ end
 --- @param  name name_params The name of the register or macro.
 --- @return integer|(fun(...):nil)|user_tok? - The contents of the register or
 ---                                            macro.
-function luatools.tex:_get(name)
+function luatools._tex:_get(name)
     self = self.self
     local outer_self = self
 
-    local tok = self.tex:_get_token(name)
+    local tok = self._tex:_get_token(name)
     if not tok then
         return nil
     end
@@ -1514,13 +1529,15 @@ local dimen_to_sp = tex.sp
 --- @param  val  any_tok|integer|tab_toklist The value to set the register or
 ---                                          csname to.
 --- @return nil  -               -
-function luatools.tex:_set(name, val)
+function luatools._tex:_set(name, val)
     self = self.self
 
-    local tok, name = self.tex:_get_token(name)
+    local tok, name = self._tex:_get_token(name)
     if not tok then
         self.msg:error("Unknown variable ``" .. name .. "''.")
         return
+    else
+        --- @cast name -nil
     end
 
     local register_type = cmdname_to_texname[tok.cmdname]
@@ -1573,8 +1590,8 @@ end
 --= Make \typ{luatools.tex:_get} and \typ{luatools.tex:_set} metamethods on
 --= \typ{luatools.tex}.
 setmetatable(luatools.tex, {
-    __index = luatools.tex._get,
-    __newindex = luatools.tex._set,
+    __index = luatools._tex._get,
+    __newindex = luatools._tex._set,
 })
 
 
@@ -1598,7 +1615,7 @@ luatools.macro = {}
 function luatools.macro:unexpanded(name)
     self = self.self
 
-    local csname = self.tex:mangle_name(name)
+    local csname = self.alloc:mangle_name(name)
 
     return self.token.get_macro(csname)
 end
@@ -1614,13 +1631,13 @@ end
 function luatools.macro:expanded_toks(name)
     self = self.self
 
-    local csname = self.tex:mangle_name(name)
+    local csname = self.alloc:mangle_name(name)
 
     -- To correctly expand \LaTeX{} \tex{protect}ed macros, we need to redefine
     -- \tex{protect} before expanding the macro, then restore it afterwards.
     -- There's no way to save a token's definition from Lua, so we'll need to
     -- copy it to a new csname.
-    local saved_protect = lt.tex:mangle_name {
+    local saved_protect = lt.alloc:mangle_name {
         name = "expanded_toks_tmp",
         visibility = "private",
         type = "weird",
@@ -1685,7 +1702,7 @@ end
 function luatools.macro:expanded(name)
     self = self.self
 
-    local csname = self.tex:mangle_name(name)
+    local csname = self.alloc:mangle_name(name)
     local toks = self.macro:expanded_toks(csname)
     local str = self.token:toklist_to_str(toks)
 
@@ -1705,7 +1722,7 @@ end
 function luatools.macro:super_expanded(name, safe)
     self = self.self
 
-    local csname = self.tex:mangle_name(name)
+    local csname = self.alloc:mangle_name(name)
 
     local hbox
     if safe then
@@ -1830,7 +1847,7 @@ end
 function luatools.macro:to_toklist(name, raw)
     self = self.self
 
-    local csname = self.tex:mangle_name(name)
+    local csname = self.alloc:mangle_name(name)
     local meaning = macro_to_toklist(csname)
     local params, body = split_macro_meaning(meaning, raw)
 
@@ -1921,7 +1938,7 @@ function luatools.macro:define(params)
         local mangle_params = table.copy(params)
         mangle_params.type = "macro"
         mangle_params.arguments = string.rep("n", #arguments)
-        name = self.tex:mangle_name(mangle_params)
+        name = self.alloc:mangle_name(mangle_params)
     end
 
     -- Generate the scanning function
@@ -2057,7 +2074,7 @@ function luatools.macro:get_complete_argument()
 
     -- Extract the argument from the output
     local meaning_pattern = escape_pattern(
-        utf_char(self.tex.escapechar --[[@as integer]]) ..
+        utf_char(self.exec.escapechar --[[@as integer]]) ..
         csname ..
         meaning
     )
@@ -2100,7 +2117,7 @@ luatools.verbatim = {}
 local verbatim_cctab, almost_verb_cctab
 do
     -- Create a new catcode table to use for verbatim text
-    local verb_csname = lt.tex:new_register {
+    local verb_csname = lt.alloc:new_register {
         name  = "verbatim_catcodes",
         type  = "catcodetable",
         scope = "global",
@@ -2109,7 +2126,7 @@ do
     local verb_index = verb_tok.index --- @cast verb_index -nil
 
     -- And for almost-verbatim text
-    local almost_csname = lt.tex:new_register {
+    local almost_csname = lt.alloc:new_register {
         name  = "almost_verbatim_catcodes",
         type  = "catcodetable",
         scope = "global",
@@ -2154,12 +2171,12 @@ do
     --- @return nil         -       -
     function push_catcodes(cctab_index)
         -- Save the current catcode table
-        saved_cctab = lt.tex.catcodetable --[[@as integer]]
+        saved_cctab = lt.tex.catcodetable
 
         -- Save the current \tex{partokenname}
         tex.print {
             par_token_grabber,
-            utf_char(lt.tex.endlinechar --[[@as integer]]),
+            utf_char(lt.tex.endlinechar),
         }
         lt.token._run(function() end)
 
@@ -2195,7 +2212,7 @@ function luatools.verbatim:_postprocess(text, outer_level)
     self = self.self
 
     -- Replace the \tex{endlinechar} with a newline
-    local endlinechar = utf_char(lt.tex.endlinechar --[[@as integer]])
+    local endlinechar = utf_char(lt.tex.endlinechar)
     text = text:gsub(endlinechar, "\n")
 
     -- Remove extra spaces after a macro if the text was already tokenized
@@ -2226,7 +2243,7 @@ function luatools.verbatim:_postprocess(text, outer_level)
 
         -- Define patterns to match single characters by their catcodes.
         local any_char    = P(1)
-        local escape_char = P(utf_char(self.tex.escapechar --[[@as integer]]))
+        local escape_char = P(utf_char(self.tex.escapechar))
         local letters     = S(concat(letters))
         local others      = S(concat(others) )
 
@@ -2540,7 +2557,7 @@ function luatools.verbatim:grab_any()
     -- If the first token is a control sequence, then scan until we find the
     -- control sequence again.
     elseif start_tok.csname then
-        local control_seq = utf_char(self.tex.escapechar --[[@as integer]]) ..
+        local control_seq = utf_char(self.tex.escapechar) ..
                             start_tok.csname
         start_str, end_str = control_seq, control_seq
         grabbed_text = self.verbatim:grab_until(control_seq)
@@ -2677,7 +2694,7 @@ function luatools.node:attr(node, attr)
     self = self.self
 
     if type(attr) == "string" then
-        local tok = self.tex:_get_token(attr)
+        local tok = self._tex:_get_token(attr)
         attr = tok.index
     end
 
@@ -2960,7 +2977,7 @@ function luatools.node:iterate(params)
     if #params.attr == 0 then
         -- Ok
     elseif #params.attr == 1 then
-        attr_id = self.tex:_get_token(params.attr[1]).index
+        attr_id = self._tex:_get_token(params.attr[1]).index
     else
         lt.msg:error("Only one attribute can be specified.")
         return --- @diagnostic disable-line: missing-return-value
@@ -3239,13 +3256,13 @@ function luatools.node:from_str(text, catcodes)
         cctab = verbatim_cctab
     elseif catcodes == "current" then
         hbox  = self.token.cached["hbox"]
-        cctab = self.tex.catcodetable --[[@as integer]]
+        cctab = self.tex.catcodetable
     else
         lt.msg:error("Invalid catcodes: " .. catcodes)
     end
 
     -- Move the string into a token register
-    local register_csname = self.tex:new_register {
+    local register_csname = self.alloc:new_register {
         name = "node_from_str_tmp",
         type = "toks",
     }
