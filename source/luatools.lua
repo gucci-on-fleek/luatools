@@ -66,7 +66,10 @@ local utf_char = utf8.char
 local utf_code = utf8.codepoint
 
 --= Gets the maximum of two values.
-local max = math.max
+local maximum = math.max
+
+--= Gets the minimum of two values.
+local minimum = math.min
 
 --= Escapes a string for use in a Lua pattern.
 --- @param  str string The string to escape.
@@ -642,6 +645,13 @@ do
 end
 
 
+--= \subsection{\typ{luatools.util.lpeg_env}}
+--=
+--= An environment that first searches the \typ{lpeg} module.
+luatools.util.lpeg_env = setmetatableindex(table.copy(lpeg), _ENV)
+luatools.util.lpeg_env.print = print
+
+
 --=---------------------------------
 --= \section{Tokens (Low-Level)} ---
 --=---------------------------------
@@ -849,12 +859,12 @@ lt.token.cmd["max_char_code"] = lt.token.cmd["delim_num"]
 --= Gets a \TeX{} token by name and caches it for later.
 
 --- @diagnostic disable-next-line: undefined-field
-local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
+local is_token_defined = luatex_lmtx(token.is_defined, token.isdefined)
 
 --- @type table<string, user_tok?> - -
 luatools.token.cached = lt.util:memoized(function(csname)
     -- We don't want to cache undefined tokens
-    if token_defined(csname) then
+    if is_token_defined(csname) then
         return lt.token:new(csname)
     end
 end)
@@ -879,7 +889,7 @@ function luatools.token:set_csname(name, tok, scope)
     -- We need to define a token with the provided csname first, otherwise we
     -- get an `undefined_cs`-type token, which can't be passed to TeX without
     -- throwing an error.
-    if not token_defined(csname) then
+    if not is_token_defined(csname) then
         self.token.set_char(csname, 0)
     end
 
@@ -1081,7 +1091,7 @@ function luatools.token:to_tab_toklist(in_toklist)
                 insert(out_toklist, {
                     user_tok.command,
                     user_tok.mode,
-                    max(user_tok.tok - CS_TOKEN_FLAG, 0)
+                    maximum(user_tok.tok - CS_TOKEN_FLAG, 0)
                 })
             end
         end
@@ -1090,6 +1100,27 @@ function luatools.token:to_tab_toklist(in_toklist)
     end
 end
 
+
+--= \subsection{\typ{luatools.token:to_user_toklist}}
+--=
+--= Converts \typ{any_toklist}s into \typ{user_tok[]}s.
+
+--- @param  in_toklist any_toklist The token list to convert.
+--- @return user_tok[] -           The converted token list.
+function luatools.token:to_user_toklist(in_toklist)
+    self = self.self
+
+    if type(in_toklist) == "string" then
+        in_toklist = self.token:to_tab_toklist(in_toklist)
+    end
+
+    local out_toklist = {}
+    for _, any_tok in ipairs(in_toklist) do
+        insert(out_toklist, self.token:new(any_tok))
+    end
+
+    return out_toklist
+end
 
 --=-------------------------
 --= \section{Allocators} ---
@@ -1244,7 +1275,7 @@ function luatools.alloc:mangle_name(params)
     -- Store the mangled name in the cache, only if the token it references is
     -- defined. (We'll sometimes use this function to see if a mangled name is
     -- already defined, so we can't cache it unconditionally.)
-    if token_defined(name) then
+    if is_token_defined(name) then
         self._name_cache[params.name] = name
     end
 
@@ -1473,21 +1504,12 @@ function luatools._tex:_get(name)
     if cmdname:match("call") then
         return function(...)
             local in_args = {...}
-            local out_args = {}
-
-            local bgroup, egroup
-            if type(in_args[1]) == "string" then
-                bgroup = "{"
-                egroup = "}"
-            else
-                bgroup = outer_self.token.cached["{"]
-                egroup = outer_self.token.cached["}"]
-            end
+            local out_args = {}  --- @type user_tok[]
 
             for _, arg in ipairs(in_args) do
-                insert(out_args, bgroup)
-                insert(out_args, arg)
-                insert(out_args, egroup)
+                insert(out_args, outer_self.token.cached["{"])
+                append(out_args, outer_self.token:to_user_toklist(arg))
+                insert(out_args, outer_self.token.cached["}"])
             end
 
             outer_self.token:run {
@@ -1746,7 +1768,7 @@ function luatools.macro:super_expanded(name, safe)
 end
 
 
---= \subsection{\typ{luatools.macro:to_toklist}}
+--= \subsection{\typ{luatools.macro:unexpanded_toks}}
 --=
 --= Gets the raw, unexpanded “replacement text” of a macro as an array of
 --= tokens.
@@ -1844,7 +1866,7 @@ end
 ---                            more user-friendly format.
 --- @return tab_toklist params The parameters of the macro.
 --- @return tab_toklist body   The replacement text of the macro.
-function luatools.macro:to_toklist(name, raw)
+function luatools.macro:unexpanded_toks(name, raw)
     self = self.self
 
     local csname = self.alloc:mangle_name(name)
@@ -2074,7 +2096,7 @@ function luatools.macro:get_complete_argument()
 
     -- Extract the argument from the output
     local meaning_pattern = escape_pattern(
-        utf_char(self.exec.escapechar --[[@as integer]]) ..
+        utf_char(self.tex.escapechar) ..
         csname ..
         meaning
     )
@@ -2239,7 +2261,7 @@ function luatools.verbatim:_postprocess(text, outer_level)
         end
 
         -- Switch to the LPeg environment to reduce typing.
-        local _ENV = lpeg
+        local _ENV = lt.util.lpeg_env
 
         -- Define patterns to match single characters by their catcodes.
         local any_char    = P(1)
@@ -2265,8 +2287,8 @@ function luatools.verbatim:_postprocess(text, outer_level)
         local control_word_space = control_word * remove_space
 
         -- Find \tex{the}\tex{partokenname}
-        local partoken_csname = (saved_partokenname or {}).csname or P("par")
-        local partoken        = escape_char * partoken_csname * P(" ")
+        local partoken_csname = (saved_partokenname or {}).csname or (P "par")
+        local partoken        = escape_char * partoken_csname * (P " ")
 
         -- One newline in the source maps to a plain space (unfortunately), two
         -- newlines map to a single partoken, three newlines map to two
@@ -3286,44 +3308,355 @@ function luatools.node:from_str(text, catcodes)
 end
 
 
---= \subsection{\typ{luatools.node:colour_list}}
+--=----------------------
+--= \section{Colours} ---
+--=----------------------
 --=
---= Colours a list of nodes.
+--= Here, we define some functions for working with colours. This is the area
+--= where the different formats differ the most, so the implementations won't
+--= share much in common.
 
---- @param  name string The name of the colour
---- @return string? -   The colour's value, in a format-dependent format
-local function colour_name_to_value(name)
-    if lt.fmt.context then
-        return name
-    elseif lt.fmt.optex then
-        local colour = token.get_macro(name)
-        if not colour then
+--- @class luatools.colour: _lt_base A table containing colour functions.
+luatools.colour = {}
+
+
+--= \subsection{Colour Objects}
+--=
+--= Each format uses a different format to represent a colour, so all of our
+--= colour functions will take an opaque \typ{colour} object.
+
+--- @alias _colour_model "rgb"|"cmyk"|"grey"
+
+--- @class (exact) _colour_rgb
+--- @field [1] number - 0 (black) to 1 (red)
+--- @field [2] number - 0 (black) to 1 (green)
+--- @field [3] number - 0 (black) to 1 (blue)
+
+--- @class (exact) _colour_cmyk
+--- @field [1] number - 0 (white) to 1 (cyan)
+--- @field [2] number - 0 (white) to 1 (magenta)
+--- @field [3] number - 0 (white) to 1 (yellow)
+--- @field [4] number - 0 (white) to 1 (black)
+
+--- @class (exact) _colour_grey
+--- @field [1] number - 0 (black) to 1 (white)
+
+--- @alias _colour_value_model
+--- | {[1]: _colour_rgb,  [2]: "rgb"  }
+--- | {[1]: _colour_cmyk, [2]: "cmyk" }
+--- | {[1]: _colour_grey, [2]: "grey" }
+
+--- @class colour - A colour object.
+--- @field initial_model _colour_model|"name" The colour model the colour was
+---                                           originally defined in.
+--- @field base_model    _colour_model The base colour model from which the
+---                                    other models are derived.
+--- @field render_model  _colour_model|"name" The colour model that will be used
+---                                           for rendering the colour.
+--- @field rgb        _colour_rgb
+--- @field cmyk       _colour_cmyk
+--- @field grey       _colour_grey
+--- @field name       string The name of the colour.
+--- @field pdf_fill   string A PDF operator for filling with this colour.
+--- @field pdf_stroke string A PDF operator for outlining with this colour.
+local _colour = {}
+
+--= Indexes the colour object.
+--- @param  requested_key              string The key to get.
+--- @return number[]|number|string|nil value  The value of the key.
+function _colour:__index(requested_key)
+    local super = _colour
+
+    if requested_key:match("^_") then
+        return super[requested_key]
+    end
+
+    for _, prefix in ipairs { "", "_" } do
+        local found_key = prefix .. requested_key
+        local found_val = super[found_key]
+
+        local out_val
+        if type(found_val) == "function" then
+            out_val = found_val(self)
+        elseif found_val ~= nil then
+            out_val = found_val
+        end
+
+        if out_val ~= nil then
+            rawset(self, requested_key, out_val)
+            return out_val
+        end
+    end
+end
+
+
+--= \subsection{\typ{luatools.colour:new}}
+--=
+--= Creates a new colour object.
+
+--- @param                    params  {rgb:_colour_rgb}
+--- @return                                                    colour
+--- @overload fun(self: self, params: { cmyk: _colour_cmyk }): colour
+--- @overload fun(self: self, params: { grey: _colour_grey }): colour
+--- @overload fun(self: self, params: { name: string       }): colour
+function luatools.colour:new(params)
+    self = self.self
+
+    local key
+    for k, v in pairs(params) do
+        if not key then
+            key = k
+        else
+            lt.msg:error("Multiple colour models specified.")
+            return --- @diagnostic disable-line: missing-return-value
+        end
+    end
+
+    --- @cast params colour
+
+    if key then
+        params.initial_model = key
+    else
+        lt.msg:error("No colour model specified.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    return setmetatable(params, _colour)
+end
+
+
+--= \subsection{Name to Components}
+--=
+--= Here, we use a colour name to get its corresponding components.
+
+local _colour_initialize_latex
+--= Initialize the colour module for \LaTeX{}.
+--- @param  skip_loading_backend boolean? Whether to skip loading the backend.
+--- @return nil - -
+_colour_initialize_latex = function(skip_loading_backend)
+    if is_token_defined("c_sys_backend_str") then
+        local backend = lt.macro:unexpanded("c_sys_backend_str")
+        if backend == "luatex" then
+            _colour_initialize_latex = function() end
+            return
+        else
+            lt.msg:error("Colours require the ``luatex'' backend.")
             return
         end
+    elseif not skip_loading_backend then
+        lt.tex["sys_load_backend:n"]("luatex")
+        _colour_initialize_latex(true)
+    else
+        lt.msg:error("Failed to initialize colour parsing.")
+    end
+end
 
-        local rgb = colour:match[[\_setrgbcolor {([%d.]+ [%d.]+ [%d.]+)}]]
-        local cmyk = colour:match(
-            [[\_setcmykcolor {([%d.]+ [%d.]+ [%d.]+ [%d.]+)}]]
+--= Parse a PDF colour string into its components.
+local _colour_parse_pdf_string
+do
+    local _ENV = lt.util.lpeg_env
+
+    -- A colour value is strictly between 0 and 1.
+    local decimal = (P "0")^-1 * ((P ".") * (R "09")^0)^-1
+    local one     = (P "1") * ((P ".") * (P "0")^0)^-1
+    local number  = (one + decimal) / tonumber
+
+    -- Values and operators are separated by spaces.
+    local space     = (P " ")^1
+    local opt_space = (P " ")^0
+
+    -- A number sequence is a specific amount of numbers separated by spaces.
+    local function number_seq(n)
+        local number_space = number * space
+        return Ct(-number_space^(n + 1) * number_space^n)
+    end
+
+    -- Grey operators take a single value.
+    local grey_operator = ((P "G") + (P "g")) / "grey"
+    local grey          = number_seq(1) * grey_operator
+
+    -- RGB operators take three values.
+    local rgb_operator = ((P "RG") + (P "rg")) / "rgb"
+    local rgb          = number_seq(3) * rgb_operator
+
+    -- CMYK operators take four values.
+    local cmyk_operator = ((P "K") + (P "k")) / "cmyk"
+    local cmyk          = number_seq(4) * cmyk_operator
+
+    -- A colour can be any of the above operators.
+    local pdf_colour = Ct(grey + rgb + cmyk)
+
+    -- We can have any sequence of colours separated by spaces.
+    local pdf_colours = pdf_colour * (space * pdf_colour)^0
+
+    -- Allow for optional spaces at the start and end.
+    pdf_colours = Ct(opt_space * pdf_colours * opt_space)
+
+    --- Parse a PDF colour string into its components.
+    --- @param  pdf string              The PDF colour string.
+    --- @return _colour_value_model[] - The colour values.
+    function _colour_parse_pdf_string(pdf)
+        return lpeg.match(pdf_colours, pdf)
+    end
+end
+
+--= Uses the name of the colour to get the colour components.
+--- @return _colour_model - The base colour model.
+function _colour:_base_model()
+    local name = self.name
+
+    if lt.fmt.latex then
+        -- The l3backend package provides the \typ{parse_color} callback, so we
+        -- need to make sure that it's loaded.
+        _colour_initialize_latex()
+
+        -- In order to set the colour of a font, \typ{luaotfload} requires that
+        -- you provide the \typ{luaotfload.parse_color} callback which takes in
+        -- some value and returns a PDF literal string to set the colour. We can
+        -- abuse this to let \LaTeX{} handle parsing the colours for us.
+        local pdf = luatexbase.call_callback("luaotfload.parse_color", name)
+
+        -- Now, we can parse the colour components from the PDF literal string.
+        -- The string typically contains both fill and stroke operations, so we
+        -- need to loop through all found colours.
+        local colours = _colour_parse_pdf_string(pdf) or {}
+        for _, colour in ipairs(colours) do
+            local colour, model = unpack(colour)
+
+            -- Set the colour to the found value, and mark this model as
+            -- the base model.
+            self[model] = colour
+            return model
+        end
+    else
+        lt.msg:error("Not implemented.") -- TODO
+        return  --- @diagnostic disable-line: missing-return-value
+    end
+end
+
+
+--= Sets the render model based on the initial model and format.
+--- @return _colour_model|"name" - The model to render the colour in.
+function _colour:_render_model()
+    if self.initial_model == "name" then
+        -- With \ConTeXt{}, we can render a named colour directly.
+        if lt.fmt.context then
+            return "name"
+
+        -- With \LaTeX{}, we need the components of the colour to render it.
+        elseif lt.fmt.latex then
+            return self.base_model
+
+        else
+            lt.msg:error("Not implemented.") -- TODO
+            return  --- @diagnostic disable-line: missing-return-value
+        end
+    else
+        return self.initial_model
+    end
+end
+
+
+--= \subsection{Model Conversions}
+--=
+--= Here, we handle converting between the different colour models using the
+--= formulae given in the PDF~2.0 specification.
+
+--= Gets the grey value of a colour.
+--- @return _colour_grey - The grey value of the colour.
+function _colour:_grey()
+    local grey
+
+    if self.base_model == "grey" then
+        grey = unpack(self.grey)
+
+    elseif self.base_model == "rgb" then
+        local red, green, blue = unpack(self.rgb)
+        grey = 0.30 * red   +
+               0.59 * green +
+               0.11 * blue
+
+    elseif self.base_model == "cmyk" then
+        local cyan, magenta, yellow, black = unpack(self.cmyk)
+        grey = 1.0 - minimum(1.0,
+            0.30 * cyan    +
+            0.59 * magenta +
+            0.11 * yellow  +
+            1.00 * black
         )
 
-        if rgb then
-            return ("%s rg %s RG"):format(rgb, rgb)
-        elseif cmyk then
-            return ("%s k %s K"):format(cmyk, cmyk)
-        end
-    elseif lt.fmt.plain or lt.fmt.latex then
-        -- `color`, `xcolor`
-        local colour = token.get_macro([[\color@]] .. name)
-
-        if colour then
-            local xcolor = colour:match[[\xcolor@ {}{([^}]+)}]]
-
-            return xcolor or colour
-        end
-
-        -- `l3color`
-        -- TODO Not implemented yet
+    else
+        lt.msg:error("Invalid colour model.")
+        return  --- @diagnostic disable-line: missing-return-value
     end
+
+    return { grey }
+end
+
+
+--= Gets the RGB value of a colour.
+--- @return _colour_rgb - The RGB value of the colour.
+function _colour:_rgb()
+    local red, green, blue
+
+    if self.base_model == "grey" then
+        local grey = unpack(self.grey)
+        red, green, blue = grey, grey, grey
+
+    elseif self.base_model == "rgb" then
+        red, green, blue = unpack(self.rgb)
+
+    elseif self.base_model == "cmyk" then
+        local cyan, magenta, yellow, black = unpack(self.cmyk)
+        red   = 1.0 - minimum(1.0, cyan    + black)
+        green = 1.0 - minimum(1.0, magenta + black)
+        blue  = 1.0 - minimum(1.0, yellow  + black)
+
+    else
+        lt.msg:error("Invalid colour model.")
+        return  --- @diagnostic disable-line: missing-return-value
+    end
+
+    return { red, green, blue }
+end
+
+
+--= Gets the CMYK value of a colour.
+--- @return _colour_cmyk - The CMYK value of the colour.
+function _colour:_cmyk()
+    local cyan, magenta, yellow, black
+
+    if self.base_model == "grey" then
+        local grey = unpack(self.grey)
+        cyan    = 0.0
+        magenta = 0.0
+        yellow  = 0.0
+        black   = 1.0 - grey
+
+    elseif self.base_model == "rgb" then
+        local grey = unpack(self.grey)
+        if (grey < 0.05) or (grey > 0.95) then
+            cyan    = 0.0
+            magenta = 0.0
+            yellow  = 0.0
+            black   = 1.0 - grey
+        else
+            local red, green, blue = unpack(self.rgb)
+            cyan    = 1.0 - red
+            magenta = 1.0 - green
+            yellow  = 1.0 - blue
+            black   = 0
+        end
+
+    elseif self.base_model == "cmyk" then
+        cyan, magenta, yellow, black = unpack(self.cmyk)
+
+    else
+        lt.msg:error("Invalid colour model.")
+        return  --- @diagnostic disable-line: missing-return-value
+    end
+
+    return { cyan, magenta, yellow, black }
 end
 
 
