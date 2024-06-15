@@ -650,6 +650,7 @@ end
 --= An environment that first searches the \typ{lpeg} module.
 luatools.util.lpeg_env = setmetatableindex(table.copy(lpeg), _ENV)
 luatools.util.lpeg_env.print = print
+luatools.util.lpeg_env.type  = type
 
 
 --=---------------------------------
@@ -859,12 +860,12 @@ lt.token.cmd["max_char_code"] = lt.token.cmd["delim_num"]
 --= Gets a \TeX{} token by name and caches it for later.
 
 --- @diagnostic disable-next-line: undefined-field
-local is_token_defined = luatex_lmtx(token.is_defined, token.isdefined)
+local token_defined = luatex_lmtx(token.is_defined, token.isdefined)
 
 --- @type table<string, user_tok?> - -
 luatools.token.cached = lt.util:memoized(function(csname)
     -- We don't want to cache undefined tokens
-    if is_token_defined(csname) then
+    if token_defined(csname) then
         return lt.token:new(csname)
     end
 end)
@@ -889,7 +890,7 @@ function luatools.token:set_csname(name, tok, scope)
     -- We need to define a token with the provided csname first, otherwise we
     -- get an `undefined_cs`-type token, which can't be passed to TeX without
     -- throwing an error.
-    if not is_token_defined(csname) then
+    if not token_defined(csname) then
         self.token.set_char(csname, 0)
     end
 
@@ -1275,7 +1276,7 @@ function luatools.alloc:mangle_name(params)
     -- Store the mangled name in the cache, only if the token it references is
     -- defined. (We'll sometimes use this function to see if a mangled name is
     -- already defined, so we can't cache it unconditionally.)
-    if is_token_defined(name) then
+    if token_defined(name) then
         self._name_cache[params.name] = name
     end
 
@@ -1693,15 +1694,16 @@ function luatools.macro:expanded_toks(name)
     self.token._run(function()
         -- (1)
         self.token:push {
+            self.token.cached["expandafter"],
+            self.token.cached["relax"],
             self.token:new(csname),
             self.token.cached["}"]
         }
         -- (2)
-        local first = self.token.scan_token()
+        local relax = self.token.scan_token()
         -- (3)
         self.token:push {
             self.token.cached["{"],
-            first,
         }
         -- (4)
         out_toklist = self.token.scan_toks(false, true)
@@ -3434,7 +3436,7 @@ local _colour_initialize_latex
 --- @param  skip_loading_backend boolean? Whether to skip loading the backend.
 --- @return nil - -
 _colour_initialize_latex = function(skip_loading_backend)
-    if is_token_defined("c_sys_backend_str") then
+    if token_defined("c_sys_backend_str") then
         local backend = lt.macro:unexpanded("c_sys_backend_str")
         if backend == "luatex" then
             _colour_initialize_latex = function() end
@@ -3452,7 +3454,7 @@ _colour_initialize_latex = function(skip_loading_backend)
 end
 
 --= Parse a PDF colour string into its components.
-local _colour_parse_pdf_string
+local _colour_parse_pdf_string, _colour_parse_optex
 do
     local _ENV = lt.util.lpeg_env
 
@@ -3466,22 +3468,24 @@ do
     local opt_space = (P " ")^0
 
     -- A number sequence is a specific amount of numbers separated by spaces.
+    --- @param  n integer The number of numbers in the sequence.
+    --- @return Pattern - The pattern for the number sequence.
     local function number_seq(n)
         local number_space = number * space
-        return Ct(-number_space^(n + 1) * number_space^n)
+        return -number_space^(n + 1) * number_space^n
     end
 
     -- Grey operators take a single value.
     local grey_operator = ((P "G") + (P "g")) / "grey"
-    local grey          = number_seq(1) * grey_operator
+    local grey          = Ct(number_seq(1)) * grey_operator
 
     -- RGB operators take three values.
     local rgb_operator = ((P "RG") + (P "rg")) / "rgb"
-    local rgb          = number_seq(3) * rgb_operator
+    local rgb          = Ct(number_seq(3)) * rgb_operator
 
     -- CMYK operators take four values.
     local cmyk_operator = ((P "K") + (P "k")) / "cmyk"
-    local cmyk          = number_seq(4) * cmyk_operator
+    local cmyk          = Ct(number_seq(4)) * cmyk_operator
 
     -- A colour can be any of the above operators.
     local pdf_colour = Ct(grey + rgb + cmyk)
@@ -3496,7 +3500,66 @@ do
     --- @param  pdf string              The PDF colour string.
     --- @return _colour_value_model[] - The colour values.
     function _colour_parse_pdf_string(pdf)
-        return lpeg.match(pdf_colours, pdf)
+        return match(pdf_colours, pdf)
+    end
+
+    -- Op\TeX{} colours consist of \tex{_setcolor} followed by the colour values
+    -- in braces, followed by the stroke and fill operators.
+
+    -- Define the \TeX{} metacharacters.
+    local escape_char = P(utf_char(lt.tex.escapechar))
+    local left_brace  = P "{"
+    local right_brace = P "}"
+
+    --= Handle braced arguments
+    --- @param  pattern string|Pattern The string or patternto brace.
+    --- @return Pattern -              The braced pattern.
+    local function braced(pattern)
+        -- If the pattern is a string, we need to convert it to a pattern.
+        local str
+        if type(pattern) == "string" then
+            str     = pattern
+            pattern = P(pattern)
+        end
+
+        -- Make sure that we capture only the pattern.
+        pattern = Ct(pattern)
+
+        -- Anything between braces is braced.
+        local braced = left_brace * pattern * right_brace
+
+        -- If the string is only one character, we don't need to brace it.
+        if str and str:len() == 1 then
+            return braced + pattern
+        else
+            return braced
+        end
+    end
+
+    -- The beginning of a colour definition.
+    local set_color = escape_char * (P "_")^-1 * (P "setcolor")
+
+    -- The operators
+    local grey_operators = (braced("g")  * opt_space * braced("G"))  / "grey"
+    local rgb_operators  = (braced("rg") * opt_space * braced("RG")) / "rgb"
+    local cmyk_operators = (braced("k")  * opt_space * braced("K"))  / "cmyk"
+
+    -- The colour values
+    local grey_values = braced(opt_space * number * opt_space)
+    local rgb_values  = braced(opt_space * number_seq(2) * number * opt_space)
+    local cmyk_values = braced(opt_space * number_seq(3) * number * opt_space)
+
+    -- The full colour definitions
+    local grey = grey_values * opt_space * grey_operators
+    local rgb  = rgb_values  * opt_space * rgb_operators
+    local cmyk = cmyk_values * opt_space * cmyk_operators
+    local optex_colour = Ct(set_color * opt_space * (grey + rgb + cmyk))
+
+    --- Parse an Op\TeX{} colour string into its components.
+    --- @param  contents string       The Op\TeX{} colour string.
+    --- @return _colour_value_model - The colour value.
+    function _colour_parse_optex(contents)
+        return match(optex_colour, contents)
     end
 end
 
@@ -3505,6 +3568,8 @@ end
 function _colour:_base_model()
     local name = self.name
 
+    -- For \LaTeX{}, colours can be defined by either \typ{(x)color} or by
+    -- \typ{l3color}.
     if lt.fmt.latex then
         -- The l3backend package provides the \typ{parse_color} callback, so we
         -- need to make sure that it's loaded.
@@ -3528,6 +3593,27 @@ function _colour:_base_model()
             self[model] = colour
             return model
         end
+
+    -- Op\TeX{} colours are simple macros.
+    elseif lt.fmt.optex then
+        if not token_defined(name) then
+            lt.msg:error("Colour ``" .. name .. "'' is not defined.")
+            return  --- @diagnostic disable-line: missing-return-value
+        end
+
+        local contents = lt.macro:expanded(name)
+        local parsed   = _colour_parse_optex(contents) or {}
+        local colour, model = unpack(parsed)
+
+        if (not colour) or (not model) then
+            lt.msg:error("Failed to parse colour ``" .. name .. "''")
+            return  --- @diagnostic disable-line: missing-return-value
+        end
+
+        self[model] = colour
+        return model
+
+    -- Other engines.
     else
         lt.msg:error("Not implemented.") -- TODO
         return  --- @diagnostic disable-line: missing-return-value
@@ -3543,13 +3629,10 @@ function _colour:_render_model()
         if lt.fmt.context then
             return "name"
 
-        -- With \LaTeX{}, we need the components of the colour to render it.
-        elseif lt.fmt.latex then
-            return self.base_model
-
+        -- For everything else, we need the components of the colour to render
+        -- it.
         else
-            lt.msg:error("Not implemented.") -- TODO
-            return  --- @diagnostic disable-line: missing-return-value
+            return self.base_model
         end
     else
         return self.initial_model
