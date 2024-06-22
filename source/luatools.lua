@@ -483,7 +483,7 @@ function luatools.msg:error(msg)
         -- For ConTeXt and OpTeX, just use a raw Lua error.
         local start = self.config.name .. " Error: "
         function self.msg:error(msg)
-            error(start .. msg, 2)
+            error(start .. msg, 3)
         end
     end
 
@@ -1670,6 +1670,7 @@ function luatools.macro:expanded_toks(name)
     self.token:set_csname(saved_protect, self.token:new("protect"))
     self.token:set_csname("protect", self.token.cached["string"])
 
+    -- TODO explanation incorrect since new changes
     -- (1) To expand the macro, we first push the macro's csname and a closing
     -- brace onto the token stack:
     --     grabbed: nil
@@ -3328,6 +3329,7 @@ luatools.colour = {}
 --= colour functions will take an opaque \typ{colour} object.
 
 --- @alias _colour_model "rgb"|"cmyk"|"grey"
+--- @alias _colour_model_ext _colour_model|"name"
 
 --- @class (exact) _colour_rgb
 --- @field [1] number - 0 (black) to 1 (red)
@@ -3349,12 +3351,12 @@ luatools.colour = {}
 --- | {[1]: _colour_grey, [2]: "grey" }
 
 --- @class colour - A colour object.
---- @field initial_model _colour_model|"name" The colour model the colour was
----                                           originally defined in.
---- @field base_model    _colour_model The base colour model from which the
----                                    other models are derived.
---- @field render_model  _colour_model|"name" The colour model that will be used
----                                           for rendering the colour.
+--- @field initial_model _colour_model_ext The colour model the colour was
+---                                        originally defined in.
+--- @field base_model    _colour_model|false The base colour model from which
+---                                          the other models are derived.
+--- @field render_model  _colour_model_ext|false The colour model that will be
+---                                              used for rendering the colour.
 --- @field rgb        _colour_rgb
 --- @field cmyk       _colour_cmyk
 --- @field grey       _colour_grey
@@ -3563,8 +3565,9 @@ do
     end
 end
 
+
 --= Uses the name of the colour to get the colour components.
---- @return _colour_model - The base colour model.
+--- @return _colour_model|false - The base colour model.
 function _colour:_base_model()
     local name = self.name
 
@@ -3575,11 +3578,27 @@ function _colour:_base_model()
         -- need to make sure that it's loaded.
         _colour_initialize_latex()
 
+        -- Block the “Unknown color” error messages.
+        lt.tex["msg_redirect_name:nnn"]("color", "unknown-color", "none")
+
+        -- Work around an l3backend bug
+        lt.token.set_macro("l_tmpa_tl", "..")
+
         -- In order to set the colour of a font, \typ{luaotfload} requires that
         -- you provide the \typ{luaotfload.parse_color} callback which takes in
         -- some value and returns a PDF literal string to set the colour. We can
         -- abuse this to let \LaTeX{} handle parsing the colours for us.
-        local pdf = luatexbase.call_callback("luaotfload.parse_color", name)
+        local success, pdf = pcall(
+            luatexbase.call_callback,
+            "luaotfload.parse_color", name
+        )
+
+        -- Restore the error messages.
+        lt.tex["msg_redirect_name:nnn"]("color", "unknown-color", "")
+
+        if not success then
+            return false
+        end
 
         -- Now, we can parse the colour components from the PDF literal string.
         -- The string typically contains both fill and stroke operations, so we
@@ -3594,11 +3613,12 @@ function _colour:_base_model()
             return model
         end
 
+        return false
+
     -- Op\TeX{} colours are simple macros.
     elseif lt.fmt.optex then
         if not token_defined(name) then
-            lt.msg:error("Colour ``" .. name .. "'' is not defined.")
-            return  --- @diagnostic disable-line: missing-return-value
+            return false
         end
 
         local contents = lt.macro:expanded(name)
@@ -3606,12 +3626,32 @@ function _colour:_base_model()
         local colour, model = unpack(parsed)
 
         if (not colour) or (not model) then
-            lt.msg:error("Failed to parse colour ``" .. name .. "''")
-            return  --- @diagnostic disable-line: missing-return-value
+            return false
         end
 
         self[model] = colour
         return model
+
+    -- For Plain TeX, we assume that the \typ{color} package is used.
+    elseif lt.fmt.plain then
+        name = [[\color@]] .. name
+        local pdf = lt.macro:unexpanded(name)
+
+        if not pdf then
+            return false
+        end
+
+        local colours = _colour_parse_pdf_string(pdf) or {}
+        for _, colour in ipairs(colours) do
+            local colour, model = unpack(colour)
+
+            -- Set the colour to the found value, and mark this model as
+            -- the base model.
+            self[model] = colour
+            return model
+        end
+
+        return false
 
     -- Other engines.
     else
@@ -3622,7 +3662,7 @@ end
 
 
 --= Sets the render model based on the initial model and format.
---- @return _colour_model|"name" - The model to render the colour in.
+--- @return _colour_model_ext|false - The model to render the colour in.
 function _colour:_render_model()
     if self.initial_model == "name" then
         -- With \ConTeXt{}, we can render a named colour directly.
@@ -3645,12 +3685,22 @@ end
 --= Here, we handle converting between the different colour models using the
 --= formulae given in the PDF~2.0 specification.
 
+-- If we can't find a named colour, we'll use black as a fallback.
+local _colour_fallbacks = {
+    grey = { 1.0 },
+    rgb  = { 0.0, 0.0, 0.0 },
+    cmyk = { 0.0, 0.0, 0.0, 1.0 },
+}
+
 --= Gets the grey value of a colour.
 --- @return _colour_grey - The grey value of the colour.
 function _colour:_grey()
     local grey
 
-    if self.base_model == "grey" then
+    if not self.base_model then
+        grey = unpack(_colour_fallbacks.grey)
+
+    elseif self.base_model == "grey" then
         grey = unpack(self.grey)
 
     elseif self.base_model == "rgb" then
@@ -3682,7 +3732,10 @@ end
 function _colour:_rgb()
     local red, green, blue
 
-    if self.base_model == "grey" then
+    if not self.base_model then
+        red, green, blue = unpack(_colour_fallbacks.rgb)
+
+    elseif self.base_model == "grey" then
         local grey = unpack(self.grey)
         red, green, blue = grey, grey, grey
 
@@ -3709,7 +3762,10 @@ end
 function _colour:_cmyk()
     local cyan, magenta, yellow, black
 
-    if self.base_model == "grey" then
+    if not self.base_model then
+        cyan, magenta, yellow, black = unpack(_colour_fallbacks.cmyk)
+
+    elseif self.base_model == "grey" then
         local grey = unpack(self.grey)
         cyan    = 0.0
         magenta = 0.0
@@ -3717,18 +3773,17 @@ function _colour:_cmyk()
         black   = 1.0 - grey
 
     elseif self.base_model == "rgb" then
-        local grey = unpack(self.grey)
-        if (grey < 0.05) or (grey > 0.95) then
+        local red, green, blue = unpack(self.rgb)
+
+        black = 1.0 - maximum(red, green, blue)
+        if black == 1 then
             cyan    = 0.0
             magenta = 0.0
             yellow  = 0.0
-            black   = 1.0 - grey
         else
-            local red, green, blue = unpack(self.rgb)
-            cyan    = 1.0 - red
-            magenta = 1.0 - green
-            yellow  = 1.0 - blue
-            black   = 0
+            cyan    = (1.0 - red    - black) / (1.0 - black)
+            magenta = (1.0 - green  - black) / (1.0 - black)
+            yellow  = (1.0 - blue   - black) / (1.0 - black)
         end
 
     elseif self.base_model == "cmyk" then
