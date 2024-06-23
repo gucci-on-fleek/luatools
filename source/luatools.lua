@@ -17,7 +17,7 @@ end
 --= We require \typ{luaotfload} (for \typ{lualibs} and \typ{luatexbase}), but
 --= Plain~\LuaTeX{} and Op\TeX{} don't always have it loaded, so we'll load it
 --= here if it's not already loaded.
-if not package.loaded.luaotfload then
+if (not context) and (not package.loaded.luaotfload) then
     if optex then
         tex.runtoks(function()
             tex.sprint[[\_initunifonts]]
@@ -70,6 +70,10 @@ local maximum = math.max
 
 --= Gets the minimum of two values.
 local minimum = math.min
+
+--= An empty function.
+--- @type fun():nil
+local empty_function = function() end
 
 --= Escapes a string for use in a Lua pattern.
 --- @param  str string The string to escape.
@@ -671,6 +675,7 @@ luatools.util.lpeg_env.type  = type
 --= First off, we have the userdata \typ{token} objects, which are returned by
 --= the builtin \typ{token.create} function.
 --- @alias user_tok luatex.token
+local TOKEN_TYPE = luatex_lmtx("luatex.token", "token.instance")
 
 --= Next, given a csname as a string, we can easily get the underlying token
 --= object.
@@ -726,6 +731,8 @@ end)
 --= Add some useful aliases
 luatools.token.scan_integer = luatools.token.scan_int
 
+local token_mode = luatex_lmtx("mode", "index")
+
 
 --= \subsection{\typ{luatools.token:_run}}
 --= Runs the given function or token list register inside a new “local \TeX{}
@@ -755,7 +762,7 @@ local function token_create_any(tok)
     local tok_type = type(tok)
 
     -- \typ{user_tok}
-    if tok_type == "userdata" and lt.util:type(tok) == "luatex.token" then
+    if tok_type == "userdata" and lt.util:type(tok) == TOKEN_TYPE then
         return tok
 
     -- \typ{csname_tok}
@@ -840,7 +847,9 @@ end
 --= \subsection{\typ{luatools.token.cmd}}
 --=
 --= Gets the internal “command code”, indexed by the command name.
-luatools.token.cmd = table_swapped(token.commands())
+luatools.token.cmd = table_swapped(
+    luatex_lmtx(token.commands, token.getcommandvalues)()
+)
 
 -- We need to add a few extra command codes that aren't in the builtin table
 lt.token.cmd["escape"]        = lt.token.cmd["relax"]
@@ -936,7 +945,7 @@ do
         -- somehow redefine one of our private csnames.
         local primitive = lt.token:new(prefix .. csname)
         luatools.token.cached[csname] = lt.token:new(
-            primitive.mode, primitive.command
+            primitive[token_mode], primitive.command
         )
     end
 
@@ -1075,8 +1084,8 @@ function luatools.token:to_tab_toklist(in_toklist)
         tex.scantoks(register_csname, current_cctab, in_toklist)
 
         -- Dereference the pointers
-        local outer_ptr = self.token:new(register_csname).mode
-        local inner_ptr = (lt.token:new { 0, 0, outer_ptr }).mode
+        local outer_ptr = self.token:new(register_csname)[token_mode]
+        local inner_ptr = (lt.token:new { 0, 0, outer_ptr })[token_mode]
 
         -- Extract the tokens
         local out_toklist = lt.util:convert(inner_ptr, "integer", "toklist")
@@ -1091,7 +1100,7 @@ function luatools.token:to_tab_toklist(in_toklist)
                 local user_tok = self.token:new(any_tok)
                 insert(out_toklist, {
                     user_tok.command,
-                    user_tok.mode,
+                    user_tok[token_mode],
                     maximum(user_tok.tok - CS_TOKEN_FLAG, 0)
                 })
             end
@@ -1165,14 +1174,21 @@ local expl_types = {
 --= \LuaTeX{} gives \tex{REGISTERdef}ed tokens specific command codes which
 --= we'll unfortunately need to hardcode.
 --- @type table<register_type, string> - -
-local texname_to_cmdname = {
+local texname_to_cmdname = luatex_lmtx({
     attribute    = "assign_attr",
     catcodetable = "char_given", -- close enough...
     count        = "assign_int",
     dimen        = "assign_dimen",
     toks         = "assign_toks",
     whatsit      = "char_given",
-}
+}, {
+    attribute    = "assign_attr",
+    catcodetable = "char_given", -- "catcode_table"
+    count        = "register_integer",
+    dimen        = "register_dimension",
+    toks         = "register_toks",
+    whatsit      = "char_given",
+})
 
 local cmdname_to_texname = table_swapped(texname_to_cmdname)
 
@@ -1522,8 +1538,13 @@ function luatools._tex:_get(name)
 
     -- Register
     local register_type = cmdname_to_texname[cmdname]
-    if register_type then
-        if tok.index then
+    local lmtx_register = cmdname:match("^register_")
+    local lmtx_internal = cmdname:match("^internal_")
+
+    if register_type or (lmtx_register or lmtx_internal) then
+        if (self.fmt.luatex and tok.index) or
+           (self.fmt.lmtx and lmtx_register)
+        then
             -- Regular register
             return tex[register_type][tok.index]
         else
@@ -1563,15 +1584,22 @@ function luatools._tex:_set(name, val)
         --- @cast name -nil
     end
 
-    local register_type = cmdname_to_texname[tok.cmdname]
+    local cmdname = tok.cmdname
+    local register_type = cmdname_to_texname[cmdname]
     local val_type = self.util:type(val)
+
+    local lmtx_register = cmdname:match("^register_")
+    local lmtx_internal = cmdname:match("^internal_")
 
     -- Set directly
     if ((register_type == "dimen" or register_type == "count")
         and val_type == "number") or
-       (register_type == "toks" and val_type == "string")
+       (register_type == "toks" and val_type == "string") or
+       (lmtx_register or lmtx_internal)
     then
-        if tok.index then
+        if (self.fmt.luatex and tok.index) or
+           (self.fmt.lmtx and lmtx_register)
+        then
             -- Regular register
             tex[register_type][tok.index] = val
         else
@@ -1597,7 +1625,7 @@ function luatools._tex:_set(name, val)
 
     -- Handle \tex{partokenname}
     if tok.command == self.token.cmd["partoken_name"] and
-       val_type == "luatex.token"
+       val_type    == TOKEN_TYPE
     then
         self.token:run {
             tok,
@@ -1790,7 +1818,7 @@ local function macro_to_toklist(name)
         return --- @diagnostic disable-line: missing-return-value
     end
 
-    return lt.util:convert(macro.mode, "integer", "toklist")
+    return lt.util:convert(macro[token_mode], "integer", "toklist")
 end
 
 
@@ -2203,7 +2231,7 @@ do
             par_token_grabber,
             utf_char(lt.tex.endlinechar),
         }
-        lt.token._run(function() end)
+        lt.token._run(empty_function)
 
         -- Set \tex{partokenname} to something with a csname
         lt.tex.partokenname = lt.token.cached["has_csname"]
@@ -2575,7 +2603,7 @@ function luatools.verbatim:grab_any()
     elseif start_tok.command >= lt.token.cmd["min_char_code"] and
            start_tok.command <= lt.token.cmd["max_char_code"]
     then
-        local char = utf_char(start_tok.mode)
+        local char = utf_char(start_tok[token_mode])
         start_str, end_str = char, char
         grabbed_text = self.verbatim:grab_until(char)
 
@@ -2874,8 +2902,8 @@ end
 local find_attribute = luatex_lmtx(node.find_attribute, node.findattribute)
 local traverse       = node.traverse
 local traverse_id    = luatex_lmtx(node.traverse_id, node.traverseid)
-local traverse_list  = luatex_lmtx(node.traverse_list, node.traverse_list)
-local traverse_char  = luatex_lmtx(node.traverse_glyph, node.traverse_glyph)
+local traverse_list  = luatex_lmtx(node.traverse_list, empty_function)
+local traverse_char  = luatex_lmtx(node.traverse_glyph, empty_function)
 --- @diagnostic enable: undefined-field
 
 -- A dummy node that we can use to get at the internal traversal functions
@@ -2961,9 +2989,11 @@ end
 --- @return fun(head: node, n?: node): node?, ...
 --- @return node head
 local function iterate_field(head, field)
-    if field == "char" then
+    local not_lmtx = not lt.fmt.lmtx
+
+    if not_lmtx and field == "char" then
         return traverser_char, head
-    elseif field == "list" then
+    elseif not_lmtx and field == "list" then
         return traverser_list, head
     else
         return function(head, n)
@@ -3441,7 +3471,7 @@ _colour_initialize_latex = function(skip_loading_backend)
     if token_defined("c_sys_backend_str") then
         local backend = lt.macro:unexpanded("c_sys_backend_str")
         if backend == "luatex" then
-            _colour_initialize_latex = function() end
+            _colour_initialize_latex = empty_function
             return
         else
             lt.msg:error("Colours require the ``luatex'' backend.")
@@ -3653,9 +3683,26 @@ function _colour:_base_model()
 
         return false
 
-    -- Other engines.
+    -- ConTeXt provides Lua functions that do pretty much everything for us.
+    elseif lt.fmt.context then
+        local colour = attributes.colors.spec(name)
+
+        self.rgb = { colour.r, colour.g, colour.b }
+        self.cmyk = { colour.c, colour.m, colour.y, colour.k }
+        self.grey = { colour.s }
+
+        local model
+        if colour.model == "gray" then
+            model = "grey"
+        else
+            model = colour.model
+        end
+
+        return model
+
+    -- Shouldn't happen.
     else
-        lt.msg:error("Not implemented.") -- TODO
+        lt.msg:error("Not implemented.")
         return  --- @diagnostic disable-line: missing-return-value
     end
 end
