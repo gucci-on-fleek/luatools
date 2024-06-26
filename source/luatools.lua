@@ -59,6 +59,9 @@ local unpack = table.unpack
 --= Slices a table.
 local slice = table.sub
 
+--= Copies a table.
+local copy_table = table.copy
+
 --= Gets the character at a given codepoint.
 local utf_char = utf8.char
 
@@ -73,6 +76,9 @@ local minimum = math.min
 
 --= Calculates the SHA-256 hash of a string.
 local sha256 = sha2.digest256
+
+--= Generates a formatter for a string.
+local formatters = string.formatters
 
 --= An empty function.
 --- @type fun():nil
@@ -254,7 +260,7 @@ function luatools.init(config)
     config.expl  = config.expl or false
 
     -- Create a new table
-    local self = table.copy(luatools)
+    local self = copy_table(luatools)
     self.config = config
 
     -- Make sure that there's always a pointer to the root table
@@ -718,7 +724,7 @@ end
 --= \subsection{\typ{luatools.util.lpeg_env}}
 --=
 --= An environment that first searches the \typ{lpeg} module.
-luatools.util.lpeg_env = setmetatableindex(table.copy(lpeg), _ENV)
+luatools.util.lpeg_env = setmetatableindex(copy_table(lpeg), _ENV)
 luatools.util.lpeg_env.print = print
 luatools.util.lpeg_env.type  = type
 
@@ -795,6 +801,10 @@ end)
 
 --= Add some useful aliases
 luatools.token.scan_integer = luatools.token.scan_int
+luatools.token.scan_list    = luatex_lmtx(
+    --- @diagnostic disable-next-line: undefined-field
+    token.scan_list, token.scanbox
+)
 
 local token_mode = luatex_lmtx("mode", "index")
 
@@ -2053,7 +2063,7 @@ function luatools.macro:define(params)
     if params.exact then
         name = params.name
     else
-        local mangle_params = table.copy(params)
+        local mangle_params = copy_table(params)
         mangle_params.type = "macro"
         mangle_params.arguments = string.rep("n", #arguments)
         name = self.alloc:mangle_name(mangle_params)
@@ -2938,8 +2948,8 @@ end
 --=
 --= Frees a node, but not its children.
 
---- @param  node  list_node The node to free.
---- @return node list       The head of the freed node's list.
+--- @param  node list_node The node to free.
+--- @return node list      The head of the freed node's list.
 --- @overload fun(node: node): nil
 function luatools.node:free_only(node)
     local list = node.list
@@ -2950,6 +2960,33 @@ function luatools.node:free_only(node)
     _free_recursive(node)
 
     return list
+end
+
+
+--= \subsection{\typ{luatools.node:copy_recursive}}
+--=
+--= Copies a node and all of its children.
+
+local node_copy_recursive = node.copy
+
+--- @param  node node The node to copy.
+--- @return node -    The copied node.
+function luatools.node:copy_recursive(node)
+    return node_copy_recursive(node)
+end
+
+
+--= \subsection{\typ{luatools.node:copy_following}}
+--=
+--= Copies a node and all of the nodes that follow it.
+
+--- @diagnostic disable-next-line: undefined-field
+local node_copy_following = luatex_lmtx(node.copy_list, node.copylist)
+
+--- @param  head node The head of the node list to copy.
+--- @return node -    The copied node.
+function luatools.node:copy_following(head)
+    return node_copy_following(head)
 end
 
 
@@ -3159,7 +3196,9 @@ end
 
 local remove_node = node.remove
 --- @diagnostic disable-next-line: undefined-field
-local insert_before = luatex_lmtx(node.insert_before, node.insertbefore)
+local insert_node_before = luatex_lmtx(node.insert_before, node.insertbefore)
+--- @diagnostic disable-next-line: undefined-field
+local insert_node_after = luatex_lmtx(node.insert_after, node.insertafter)
 
 --- @param  head    node The head of the list that contains \typ{find}
 --- @param  find    node The node to remove
@@ -3171,7 +3210,7 @@ function luatools.node:replace(head, find, replace)
 
     -- Insert `replace` in its place
     --- @cast current -nil
-    head, replace = insert_before(head, current, replace)
+    head, replace = insert_node_before(head, current, replace)
 
     -- Free `find`
     _free_recursive(find)
@@ -3314,6 +3353,7 @@ function luatools.node:get_next(criteria)
     end
 end
 
+
 --= \subsection{\typ{luatools.node:to_str}}
 --=
 --= Converts the contents of a node list to a string.
@@ -3406,6 +3446,24 @@ function luatools.node:from_str(text, catcodes)
 end
 
 
+--= \subsection{\typ{luatools.node:scan_braced}}
+--=
+--= Scans a braced group and converts it into a node list.
+
+--- @return node head - The head of the new node list.
+function luatools.node:scan_braced()
+    self = self.self
+
+    self.token:push {
+        self.token.cached["hbox"],
+    }
+    local box = self.token.scan_list()
+
+    -- Return the inner list
+    return self.node:free_only(box)
+end
+
+
 --=----------------------
 --= \section{Colours} ---
 --=----------------------
@@ -3456,8 +3514,7 @@ luatools.colour = {}
 --- @field cmyk       _colour_cmyk
 --- @field grey       _colour_grey
 --- @field name       string The name of the colour.
---- @field pdf_fill   string A PDF operator for filling with this colour.
---- @field pdf_stroke string A PDF operator for outlining with this colour.
+--- @field rendered   string A string in the format that the backend expects.
 local _colour = {}
 
 --= Indexes the colour object.
@@ -3987,6 +4044,142 @@ function _colour:_name()
     end
 
     return name
+end
+
+
+--= \subsection{Rendering}
+--=
+--= Here, we define functions for getting the colour in the format that the
+--= backend expects.
+
+local _colour_format_values = {
+    rgb = formatters["%0.2f %0.2f %0.2f"],
+    cmyk = formatters["%0.2f %0.2f %0.2f %0.2f"],
+    grey = formatters["%0.2f"],
+    name = formatters["%s"],
+}
+
+local _colour_format_operators = {
+    rgb = formatters["%s rg %s RG"],
+    cmyk = formatters["%s k %s K"],
+    grey = formatters["%s g %s G"],
+    name = formatters["%s"],
+}
+
+--= Gets the colour in the format that the backend expects.
+--- @return string - The colour in the format that the backend expects.
+function _colour:_rendered()
+    -- Get the chosen render model
+    local model = self.render_model or "grey"
+
+    -- Get the all the colour channels of the colour in the chosen model
+    local channels = self[model]
+
+    if type(channels) ~= "table" then
+        channels = { channels }
+    end
+
+    -- Format the colour values into space-separated decimals
+    local values = _colour_format_values[model](unpack(channels))
+
+    -- Convert the values into PDF fill and stroke operators
+    local operators = _colour_format_operators[model](values, values)
+
+    return operators
+end
+
+
+--= \subsection{\typ{luatools.colour:colour_list}}
+--=
+--= Sets the colour of a node list to the specified colour.
+
+local colour_one_node        --- @type (fun(n: node, colour: string): nil)?
+local colour_following_nodes --- @type (fun(n: node, colour: string): nil)?
+if lt.fmt.context then
+    colour_one_node = nodes.tracers.colors.set
+    colour_following_nodes = nodes.tracers.colors.setlist
+elseif lt.fmt.optex then
+    colour_one_node = optex.set_node_color
+end
+
+
+local colour_before_node  --- @type PdfColorstackWhatsitNode?
+local colour_after_node   --- @type PdfColorstackWhatsitNode?
+if lt.fmt.latex or lt.fmt.plain then
+    colour_before_node = lt.node:new({
+        type    = "whatsit",
+        subtype = "pdf_colorstack",
+        stack   = 0,
+        command = 1,
+    }) --[[ @as PdfColorstackWhatsitNode ]]
+
+    colour_after_node = lt.node:new({
+        type    = "whatsit",
+        subtype = "pdf_colorstack",
+        stack   = 0,
+        command = 2,
+    }) --[[ @as PdfColorstackWhatsitNode ]]
+end
+
+
+--- @param  colour colour         The colour to set the node list to.
+--- @param  head   node           The first node to colour.
+--- @param  tail   node|true|nil  The last node to colour. (\lua{nil} to colour
+---                               the entire list, \lua{true} to only colour
+---                               \typ{head}.)
+--- @return node   head           The new head of the node list.
+function luatools.colour:colour_list(colour, head, tail)
+    self = self.self
+
+    -- Get the colour in the format that the backend expects
+    local rendered = colour.rendered
+
+    -- \ConTeXt{} + an entire list:
+    if colour_following_nodes and (not tail) then
+        colour_following_nodes(head, rendered)
+
+        return head
+    end
+
+    -- Adjust the tail if it's not a node
+    if tail == true then
+        tail = head
+    elseif tail == nil then
+        tail = slide(head)
+    end
+
+    -- Op\TeX{} or \ConTeXt{}:
+    if colour_one_node then
+        for n in traverse(head) do
+            colour_one_node(n, rendered)
+
+            if n == tail then
+                break
+            end
+        end
+
+        return head
+    end
+
+    -- \LaTeX or Plain \TeX{}:
+    if colour_before_node and colour_after_node then
+        -- Create the colour nodes
+        local before = node_copy_recursive(colour_before_node)
+        local after  = node_copy_recursive(colour_after_node )
+
+        -- Set the colour of the nodes
+        before.data = rendered
+
+        -- Insert the colour nodes
+        head = insert_node_before(head, head, before)
+        head = insert_node_after (head, tail, after )
+
+        return head
+    end
+
+    -- Shouldn't happen
+    lt.msg:error("Not implemented.")
+    return  --- @diagnostic disable-line: missing-return-value
 end
 
 
