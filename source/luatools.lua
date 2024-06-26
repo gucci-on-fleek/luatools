@@ -71,6 +71,9 @@ local maximum = math.max
 --= Gets the minimum of two values.
 local minimum = math.min
 
+--= Calculates the SHA-256 hash of a string.
+local sha256 = sha2.digest256
+
 --= An empty function.
 --- @type fun():nil
 local empty_function = function() end
@@ -545,8 +548,12 @@ luatools.util = {}
 --=
 --= Memoizes a function call/table index.
 
---- @param  func function<any, any> The function to memoize
---- @return table -                 The “function”
+--- @class _lt_memoized<K, V>: { [K]: V } A memoized table.
+--- @operator call(any): any              - -
+
+--- @generic K, V                                -
+--- @param  func fun(key:K, cache:table<K,V>):V? The function to memoize
+--- @return _lt_memoized<K, V> -                 The “function”
 function luatools.util:memoized(func)
     return setmetatable({}, { __index = function(cache, key)
         local ret = func(key, cache)
@@ -562,16 +569,75 @@ end
 --=
 --= A variant of \typ{type} that also works on userdata.
 
+local TOKEN_TYPE = luatex_lmtx("luatex.token", "token.instance")
+local NODE_TYPE  = luatex_lmtx("luatex.node",  "node.instance" )
+
 --- @param val any   The value to get the type of
 --- @return string - The type of the value
 function luatools.util:type(val)
-    local meta = getmetatable(val)
-    if meta and meta.__name then
-        return meta.__name
+    local metatable = getmetatable(val)
+    local meta_name = metatable and metatable.__name
+
+    if meta_name then
+        if meta_name == TOKEN_TYPE then
+            return "token"
+        elseif meta_name == NODE_TYPE then
+            return "node"
+        else
+            return meta_name
+        end
     else
         return type(val)
     end
 end
+
+
+--= \subsection{\typ{luatools.util:hash_object}}
+--=
+--= Converts an object into a string that is unique to that object, but
+--= identical between copies of the object.
+
+local table_serialize = table.serialize
+local node_fields     = node.fields
+
+--- @param  object any    The object to hash
+--- @return string hashed The hash of the object
+luatools.util.hash_object = luatools.util:memoized(function(object)
+    -- If we were given a node, then we convert all of its fields into a
+    -- table
+    if lt.util:type(object) == "node" then
+        local node = object  --- @type node
+        object = {}
+
+        for _, field in ipairs(node_fields(node.id, node.subtype)) do
+            local value = node[field]
+
+            if lt.util:type(value) ~= "node" then
+                object[field] = value
+            end
+        end
+
+    -- If we were given a token, then the triple \lua{{ cmd, chr, cs }}
+    -- should uniquely identify it.
+    elseif lt.util:type(object) == "token" then
+        object = { object.cmdname, object.mode, object.csname }
+    end
+
+    -- Now, we convert the object into a string depending on its type
+    local serialized  --- @type string
+    if type(object) == "table" then
+        serialized = table_serialize(object, false)
+    elseif type(object) == "function" then
+        serialized = string.dump(object, true)
+    else
+        serialized = tostring(object)
+    end
+
+    -- Finally, we hash the object and return the first 8 characters
+    local hashed = sha256(serialized):tohex()
+
+    return hashed:sub(1, 8)
+end)
 
 
 --= \subsection{\typ{scope}}
@@ -675,7 +741,6 @@ luatools.util.lpeg_env.type  = type
 --= First off, we have the userdata \typ{token} objects, which are returned by
 --= the builtin \typ{token.create} function.
 --- @alias user_tok luatex.token
-local TOKEN_TYPE = luatex_lmtx("luatex.token", "token.instance")
 
 --= Next, given a csname as a string, we can easily get the underlying token
 --= object.
@@ -762,7 +827,7 @@ local function token_create_any(tok)
     local tok_type = type(tok)
 
     -- \typ{user_tok}
-    if tok_type == "userdata" and lt.util:type(tok) == TOKEN_TYPE then
+    if tok_type == "userdata" and lt.util:type(tok) == "token" then
         return tok
 
     -- \typ{csname_tok}
@@ -1344,7 +1409,7 @@ function luatools.alloc:new_register(params)
         elseif self.fmt.optex then
             -- OpTeX doesn't have an allocator for whatsits, so we'll use a
             -- SHA-2 hash of the name instead.
-            local low, high = sha2.digest256(name):byte(1, 2)
+            local low, high = sha256(name):byte(1, 2)
             value = high * 256 + low
         end
 
@@ -1625,7 +1690,7 @@ function luatools._tex:_set(name, val)
 
     -- Handle \tex{partokenname}
     if tok.command == self.token.cmd["partoken_name"] and
-       val_type    == TOKEN_TYPE
+       val_type    == "token"
     then
         self.token:run {
             tok,
@@ -3436,10 +3501,12 @@ end
 function luatools.colour:new(params)
     self = self.self
 
-    local key
+    -- Find the initial colour model and value
+    local initial_model, model_values
     for k, v in pairs(params) do
-        if not key then
-            key = k
+        if not initial_model then
+            initial_model = k
+            model_values  = v
         else
             lt.msg:error("Multiple colour models specified.")
             return --- @diagnostic disable-line: missing-return-value
@@ -3448,10 +3515,33 @@ function luatools.colour:new(params)
 
     --- @cast params colour
 
-    if key then
-        params.initial_model = key
+    if initial_model then
+        params.initial_model = initial_model
     else
         lt.msg:error("No colour model specified.")
+        return --- @diagnostic disable-line: missing-return-value
+    end
+
+    -- Make sure that the colour is in a valid format
+    if initial_model == "name" and type(model_values) == "string" then
+        -- Ok
+    elseif type(model_values) == "table" then
+        for channel, value in ipairs(model_values) do
+            -- Make sure that the channel is a number in the correct range
+            if type(value) == "number" and
+               value       >= 0        and
+               value       <= 1
+            then
+                -- Convert to a float
+                value = value + 0.0
+                model_values[channel] = value
+            else
+                lt.msg:error("Invalid colour channel: " .. channel)
+                return --- @diagnostic disable-line: missing-return-value
+            end
+        end
+    else
+        lt.msg:error("Invalid colour value.")
         return --- @diagnostic disable-line: missing-return-value
     end
 
@@ -3599,6 +3689,15 @@ end
 --= Uses the name of the colour to get the colour components.
 --- @return _colour_model|false - The base colour model.
 function _colour:_base_model()
+    -- If the initial model is a “real” colour model, just use that
+    local initial_model = self.initial_model
+
+    if initial_model ~= "name" then
+        --- @cast initial_model _colour_model
+        return initial_model
+    end
+
+    -- Otherwise, we need to parse the colour name.
     local name = self.name
 
     -- For \LaTeX{}, colours can be defined by either \typ{(x)color} or by
@@ -3685,6 +3784,12 @@ function _colour:_base_model()
 
     -- ConTeXt provides Lua functions that do pretty much everything for us.
     elseif lt.fmt.context then
+        local _, exists = attributes.colors.toattributes(name)
+
+        if exists <= 0 then
+            return false
+        end
+
         local colour = attributes.colors.spec(name)
 
         self.rgb = { colour.r, colour.g, colour.b }
@@ -3711,18 +3816,23 @@ end
 --= Sets the render model based on the initial model and format.
 --- @return _colour_model_ext|false - The model to render the colour in.
 function _colour:_render_model()
-    if self.initial_model == "name" then
-        -- With \ConTeXt{}, we can render a named colour directly.
-        if lt.fmt.context then
-            return "name"
+    -- Get the base model for the colour
+    local base_model = self.base_model
 
-        -- For everything else, we need the components of the colour to render
-        -- it.
-        else
-            return self.base_model
-        end
+    -- If the \typ{base_model} is \lua{false}, then we couldn't find the colour,
+    -- so just return \lua{false}.
+    if not base_model then
+        return false
+    end
+
+    -- With \ConTeXt{}, we can only render colours by name
+    if lt.fmt.context then
+        return "name"
+
+    -- For everything else, we can render colours by anything \emph{but} their
+    -- name.
     else
-        return self.initial_model
+        return base_model
     end
 end
 
@@ -3823,7 +3933,7 @@ function _colour:_cmyk()
         local red, green, blue = unpack(self.rgb)
 
         black = 1.0 - maximum(red, green, blue)
-        if black == 1 then
+        if black == 1.0 then
             cyan    = 0.0
             magenta = 0.0
             yellow  = 0.0
@@ -3842,6 +3952,41 @@ function _colour:_cmyk()
     end
 
     return { cyan, magenta, yellow, black }
+end
+
+
+--= Gets a name for the colour.
+--- @return string|nil - The name of the colour.
+function _colour:_name()
+    -- Generate a unique name for the colour
+    local model    = self.initial_model
+    local channels = self[model]
+    local hashed   = lt.util.hash_object(channels)
+    local name     = "luatools_colour_" .. hashed
+
+    -- If we're using \ConTeXt{}, we need to define a colour with this name
+    if lt.fmt.context then
+        -- Convert the colour to the format that \ConTeXt{} expects
+        local settings = { name = name }
+
+        if model == "grey" then
+            settings.s = unpack(channels)
+        elseif model == "rgb" then
+            settings.r, settings.g, settings.b = unpack(channels)
+        elseif model == "cmyk" then
+            settings.c, settings.m, settings.y, settings.k = unpack(channels)
+        end
+
+        -- Define the colour
+        attributes.colors.defineprocesscolordirect(settings)
+
+    -- For the other formats, we don't need to name/define the colour for
+    -- anything, so we won't bother.
+    else
+        return nil
+    end
+
+    return name
 end
 
 
