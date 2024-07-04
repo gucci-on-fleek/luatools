@@ -218,6 +218,9 @@ luatools.fmt = setmetatable({
     end,
     __tostring = function(t)
         return format
+    end,
+    __concat = function(a, b)
+        return tostring(a) .. tostring(b)
     end
 })
 
@@ -3517,18 +3520,26 @@ luatools.colour = {}
 --- @field rendered   string A string in the format that the backend expects.
 local _colour = {}
 
+-- Define the order that we'll use to look up the \typ{colour} methods.
+local _colour_lookups = {
+    -- Look for the bare name first.
+    { prefix = "",  suffix = ""            },
+    -- Then look for the format-specific getters.
+    { prefix = "_", suffix = "_" .. lt.fmt },
+    -- Finally, look for the generic getters.
+    { prefix = "_", suffix = ""            },
+}
+
 --= Indexes the colour object.
 --- @param  requested_key              string The key to get.
 --- @return number[]|number|string|nil value  The value of the key.
 function _colour:__index(requested_key)
     local super = _colour
 
-    if requested_key:match("^_") then
-        return super[requested_key]
-    end
+    for _, affixes in ipairs(_colour_lookups) do
+        local prefix, suffix = affixes.prefix, affixes.suffix
 
-    for _, prefix in ipairs { "", "_" } do
-        local found_key = prefix .. requested_key
+        local found_key = prefix .. requested_key .. suffix
         local found_val = super[found_key]
 
         local out_val
@@ -4047,20 +4058,27 @@ function _colour:_name()
 end
 
 
+--= \subsection{\typ{luatools.colour:define}}
+--=
+--= Makes the provided name refer to the provided colour when used in a \TeX{}
+--= “colour expression”.
+-- TODO
+
+
 --= \subsection{Rendering}
 --=
 --= Here, we define functions for getting the colour in the format that the
 --= backend expects.
 
 local _colour_format_values = {
-    rgb = formatters["%0.2f %0.2f %0.2f"],
+    rgb  = formatters["%0.2f %0.2f %0.2f"],
     cmyk = formatters["%0.2f %0.2f %0.2f %0.2f"],
     grey = formatters["%0.2f"],
     name = formatters["%s"],
 }
 
 local _colour_format_operators = {
-    rgb = formatters["%s rg %s RG"],
+    rgb  = formatters["%s rg %s RG"],
     cmyk = formatters["%s k %s K"],
     grey = formatters["%s g %s G"],
     name = formatters["%s"],
