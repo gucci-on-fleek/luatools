@@ -9,7 +9,12 @@ CTAN (probably under a different name though). Until then, there's
 nothing to see here.
 
 
-## License
+Licence
+-------
 
-Don't use this yet. At some point, this will be finished and will have a
-free license, but if you _really_ want to use it now, then email me.
+`luatools` is licensed under the [_Mozilla Public
+License_, version 2.0](https://www.mozilla.org/en-US/MPL/2.0/) or
+greater. The documentation is additionally licensed under [CC-BY-SA,
+version 4.0](https://creativecommons.org/licenses/by-sa/4.0/legalcode)
+or greater.
+
