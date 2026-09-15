@@ -1038,6 +1038,14 @@ do
         utf_code "!", lt.token.cmd["undefined_cs"]
     )
     luatools.token.cached["has_csname"] = lt.token:new(prefix .. "relax")
+
+    -- \relax needs a csname, otherwise it becomes the special "frozen \relax"
+    -- internal primitive, which we usually don't want. See
+    --
+    --     https://github.com/gucci-on-fleek/luatools/issues/14
+    --
+    -- for more details.
+    lt.token.cached["relax"] = lt.token:new(prefix .. "relax")
 end
 
 
