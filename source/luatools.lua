@@ -174,7 +174,7 @@ end
 --=
 --= \item By converting it to a string:
 --=     \startcode[lua]
---=         print("Current format: " .. lt.fmt)
+--=         print("Current format: " .. lt.fmt.format)
 --=         -- Prints "Current format: latex"
 --=     \stopcode
 --= \item By explicitly asking for the format or engine:
@@ -183,9 +183,9 @@ end
 --=     \stopcode
 --= \stopitemize
 --=
---= \noindent The possible values for \typ{lt.fmt} are:
+--= \noindent The possible values for \typ{luatools.fmt} are:
 --= \startitemize[1]
---= \item Formats:
+--= \item Formats (\typ{lt.fmt.format}):
 --=     \startitemize[2]
 --=     \item \typ{plain}: Plain \TeX{}
 --=     \item \typ{latex}: \LaTeX{}
@@ -194,7 +194,7 @@ end
 --=     \item \typ{texlua}: \LuaTeX{} in Lua-only mode (aka \typ{texlua})
 --=     \item \typ{unknown}: Anything else
 --=     \stopitemize
---= \item Engines:
+--= \item Engines (\typ{lt.fmt.engine}):
 --=     \startitemize[2]
 --=     \item \typ{luatex}: \LuaTeX{}
 --=     \item \typ{luahbtex}, \typ{hb}: Lua\ac{HB}\TeX
